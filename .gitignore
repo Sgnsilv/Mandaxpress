@@ -1,0 +1,40 @@
+# Segredos e configuração local
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Backups do banco (contêm dados financeiros)
+backups/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Editor / SO
+.idea/
+.vscode/
+.DS_Store
+
+# Logs, dumps, cookies e temporários
+*.log
+*.sql
+*.sql.gz
+*.dump
+*.jar
+cookies*.txt
+*.tmp
+*.swp
+
+# (migrations são código versionado)
+!database/migrations/*.sql

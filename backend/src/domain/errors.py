@@ -36,3 +36,35 @@ class UserAlreadyExistsError(DomainError):
 
 class UserNotFoundError(DomainError):
     code = "user_not_found"
+
+
+class ProductAlreadyExistsError(DomainError):
+    code = "product_already_exists"
+
+
+class ProductNotFoundError(DomainError):
+    code = "product_not_found"
+
+
+class InactiveProductError(DomainError):
+    code = "inactive_product"
+
+
+class SaleNotFoundError(DomainError):
+    code = "sale_not_found"
+
+
+class IdempotencyConflictError(DomainError):
+    code = "idempotency_conflict"
+
+
+class SaleAlreadyVoidedError(DomainError):
+    code = "sale_already_voided"
+
+
+class ShiftClosedError(DomainError):
+    code = "shift_closed"
+
+
+class InvalidPaymentError(DomainError):
+    code = "invalid_payment"

@@ -5,6 +5,9 @@ from datetime import timedelta
 from ...config import Config
 from ...domain.ports import Clock, PasswordHasher
 from ...use_cases.auth import AuthService
+from ...use_cases.products import ProductService
+from ...use_cases.sales import QuickSaleService
+from ...use_cases.settings import PaymentSettingsService
 from ...use_cases.users import UserAdminService
 from ..db.database import Database, MariaDbUnitOfWork
 from ..security.services import BcryptPasswordHasher, SystemClock
@@ -18,6 +21,9 @@ class Container:
     hasher: PasswordHasher
     auth: AuthService
     users: UserAdminService
+    products: ProductService
+    settings: PaymentSettingsService
+    sales: QuickSaleService
 
 
 def build_container(config: Config, clock: Clock = None, hasher: PasswordHasher = None) -> Container:
@@ -36,4 +42,7 @@ def build_container(config: Config, clock: Clock = None, hasher: PasswordHasher 
             absolute_timeout=timedelta(hours=config.session_absolute_hours),
         ),
         users=UserAdminService(uow_factory, hasher, clock),
+        products=ProductService(uow_factory, clock),
+        settings=PaymentSettingsService(uow_factory, clock),
+        sales=QuickSaleService(uow_factory, clock),
     )

@@ -7,10 +7,18 @@ from werkzeug.exceptions import HTTPException
 
 from ...domain.errors import (
     DomainError,
+    IdempotencyConflictError,
+    InactiveProductError,
     InvalidCredentialsError,
     InvalidInputError,
+    InvalidPaymentError,
     NotAuthenticatedError,
     PermissionDeniedError,
+    ProductAlreadyExistsError,
+    ProductNotFoundError,
+    SaleAlreadyVoidedError,
+    SaleNotFoundError,
+    ShiftClosedError,
     UserAlreadyExistsError,
     UserNotFoundError,
     WeakPasswordError,
@@ -39,8 +47,16 @@ _DOMAIN_STATUS = {
     PermissionDeniedError: 403,
     WeakPasswordError: 400,
     InvalidInputError: 400,
+    InvalidPaymentError: 400,
+    InactiveProductError: 409,
     UserAlreadyExistsError: 409,
+    ProductAlreadyExistsError: 409,
+    IdempotencyConflictError: 409,
+    SaleAlreadyVoidedError: 409,
+    ShiftClosedError: 409,
     UserNotFoundError: 404,
+    ProductNotFoundError: 404,
+    SaleNotFoundError: 404,
 }
 
 

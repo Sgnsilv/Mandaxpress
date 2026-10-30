@@ -4,11 +4,11 @@ import os
 import uuid
 from typing import Optional
 
-from flask import Flask, g, request
+from flask import Flask, g
 
 from ...config import Config
+from . import routes_auth, routes_products, routes_sales, routes_settings, routes_system
 from .container import Container, build_container
-from . import routes_auth, routes_system
 from .errors import register_error_handlers
 from .security import check_origin
 
@@ -23,6 +23,7 @@ def create_app(config: Optional[Config] = None, container: Optional[Container] =
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
     app.config["JSON_SORT_KEYS"] = False
+    app.extensions["mx_config"] = config
     app.extensions["mx_container"] = container or build_container(config)
 
     @app.before_request
@@ -39,5 +40,8 @@ def create_app(config: Optional[Config] = None, container: Optional[Container] =
 
     app.register_blueprint(routes_system.bp)
     app.register_blueprint(routes_auth.bp)
+    app.register_blueprint(routes_products.bp)
+    app.register_blueprint(routes_settings.bp)
+    app.register_blueprint(routes_sales.bp)
     register_error_handlers(app)
     return app

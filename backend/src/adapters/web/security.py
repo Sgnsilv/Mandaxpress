@@ -14,7 +14,7 @@ CSRF_HEADER = "X-CSRF-Token"
 
 
 def _config():
-    return current_app.extensions["mx_container"].config
+    return current_app.extensions.get("mx_config") or current_app.extensions["mx_container"].config
 
 
 def _auth():

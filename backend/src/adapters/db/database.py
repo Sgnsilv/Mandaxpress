@@ -10,7 +10,16 @@ import pymysql.cursors
 
 from ...config import Config
 from ...domain.ports import UnitOfWork
-from .repositories import MariaDbSessionRepository, MariaDbUserRepository
+from .repositories import (
+    MariaDbAuditLogRepository,
+    MariaDbCashMovementRepository,
+    MariaDbPaymentSettingsRepository,
+    MariaDbProductRepository,
+    MariaDbSaleRepository,
+    MariaDbSessionRepository,
+    MariaDbShiftRepository,
+    MariaDbUserRepository,
+)
 
 
 class Database:
@@ -59,6 +68,12 @@ class MariaDbUnitOfWork(UnitOfWork):
         self._conn = self._db.connect()
         self.users = MariaDbUserRepository(self._conn)
         self.sessions = MariaDbSessionRepository(self._conn)
+        self.products = MariaDbProductRepository(self._conn)
+        self.payment_settings = MariaDbPaymentSettingsRepository(self._conn)
+        self.shifts = MariaDbShiftRepository(self._conn)
+        self.sales = MariaDbSaleRepository(self._conn)
+        self.cash_movements = MariaDbCashMovementRepository(self._conn)
+        self.audit_logs = MariaDbAuditLogRepository(self._conn)
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:

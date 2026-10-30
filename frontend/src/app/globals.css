@@ -208,3 +208,35 @@ h1, h2, h3 { line-height: 1.2; margin: 0 0 0.5rem; }
   .topbar { flex-direction: column; align-items: flex-start; }
   .topbar-user { justify-content: flex-start; }
 }
+
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 12pt;
+  }
+  .no-print,
+  .topbar,
+  .nav-tabs,
+  button {
+    display: none !important;
+  }
+  .container {
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .card {
+    box-shadow: none !important;
+    border: 1px solid #ccc !important;
+    padding: 0.5rem !important;
+    margin-bottom: 1rem !important;
+    break-inside: avoid;
+  }
+  .table th,
+  .table td {
+    padding: 0.35rem 0.4rem !important;
+    color: #000 !important;
+  }
+}
+

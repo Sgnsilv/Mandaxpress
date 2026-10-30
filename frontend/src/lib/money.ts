@@ -37,7 +37,13 @@ export interface CashMovementRecord {
   id: number;
   tab_id?: number | null;
   sale_id?: number | null;
-  kind: "sale_payment" | "credit_deposit" | "credit_refund" | "reversal";
+  kind:
+    | "sale_payment"
+    | "credit_deposit"
+    | "credit_refund"
+    | "reversal"
+    | "cash_supply"
+    | "cash_withdrawal";
   method: PaymentMethod;
   direction: "in" | "out";
   amount: string;
@@ -125,13 +131,25 @@ export interface TabRecord {
 }
 
 export interface FinancialSummary {
+  shift_id?: number | null;
+  opening_cash?: string;
+  expected_cash?: string;
+  expected_pix?: string;
+  expected_card?: string;
+  cash_supplies_count?: number;
+  cash_supplies_total?: string;
+  cash_withdrawals_count?: number;
+  cash_withdrawals_total?: string;
   active_sales_count: number;
   voided_sales_count: number;
   pending_customer_refunds_count: number;
+  incomplete_operations_count?: number;
   active_sales_subtotal: string;
+  total_products_sold?: string;
   quick_sales_subtotal?: string;
   tabs_consumed_subtotal?: string;
   principal_received_total?: string;
+  settled_sales_subtotal?: string;
   tabs_credit_deposited_total?: string;
   tabs_credit_applied_total?: string;
   tabs_credit_refunded_total?: string;
@@ -161,12 +179,171 @@ export interface FinancialSummary {
       out_principal?: string;
       out_fee?: string;
       out_gross?: string;
+      principal_in?: string;
+      fee_in?: string;
+      gross_in?: string;
+      principal_out?: string;
+      fee_out?: string;
+      gross_out?: string;
       net_principal: string;
       net_fee: string;
       net_gross: string;
+      expected_amount?: string;
       change_given_total?: string;
     }
   >;
+}
+
+export type DiscrepancyStatus = "exact" | "surplus" | "shortage" | "pending";
+
+export interface ShiftRecord {
+  id: number;
+  status: "open" | "closed";
+  opened_by: number;
+  opened_by_name?: string | null;
+  opened_at: string;
+  opening_cash: string;
+  closed_by: number | null;
+  closed_by_name?: string | null;
+  closed_at: string | null;
+  expected_cash: string | null;
+  counted_cash: string | null;
+  cash_difference: string | null;
+  expected_pix: string | null;
+  counted_pix: string | null;
+  pix_difference: string | null;
+  expected_card: string | null;
+  counted_card: string | null;
+  card_difference: string | null;
+  discrepancy_justification: string | null;
+  notes: string | null;
+}
+
+export interface DrawerMovementRecord {
+  id: number;
+  shift_id: number;
+  kind: "cash_supply" | "cash_withdrawal";
+  method: PaymentMethod;
+  direction: "in" | "out";
+  amount: string;
+  operator_id: number;
+  operator_name?: string | null;
+  created_at: string;
+  reason?: string;
+  note?: string | null;
+}
+
+export interface ShiftConference {
+  cash: {
+    opening_cash: string;
+    inflows: string;
+    outflows: string;
+    supplies: string;
+    supplies_count: number;
+    withdrawals: string;
+    withdrawals_count: number;
+    expected_amount: string;
+    counted_amount: string | null;
+    difference: string | null;
+    status: DiscrepancyStatus;
+  };
+  pix: {
+    inflows: string;
+    outflows: string;
+    net_registered: string;
+    expected_amount: string;
+    counted_amount: string | null;
+    difference: string | null;
+    status: DiscrepancyStatus;
+  };
+  card: {
+    principal_in: string;
+    fee_in: string;
+    gross_in: string;
+    principal_out: string;
+    fee_out: string;
+    gross_out: string;
+    net_principal_registered: string;
+    net_fee_registered: string;
+    net_gross_registered: string;
+    expected_amount: string;
+    counted_amount: string | null;
+    difference: string | null;
+    status: DiscrepancyStatus;
+    settlement_note: string;
+  };
+  has_discrepancy: boolean;
+  requires_justification: boolean;
+  discrepancy_justification: string | null;
+}
+
+export interface ShiftPendencyTabItem {
+  id: number;
+  number: number;
+  customer_name: string | null;
+  subtotal_consumed: string;
+  credit_deposited: string;
+  credit_applied: string;
+  credit_refunded: string;
+  credit_balance: string;
+  principal_paid: string;
+  balance_due: string;
+  pending_refund_total: string;
+}
+
+export interface ShiftPendingRefundItem {
+  obligation_kind: "quick_sale_refund" | "tab_item_refund" | "credit_deposit_refund";
+  sale_id: number | null;
+  movement_id: number | null;
+  tab_id: number | null;
+  tab_number: number | null;
+  customer_name: string | null;
+  amount: string;
+  refund_amount: string;
+  void_reason: string | null;
+  voided_at: string | null;
+}
+
+export interface ShiftCloseBlocker {
+  code: string;
+  message: string;
+  count: number;
+  amount: string;
+}
+
+export interface ShiftPendencies {
+  open_tabs_count: number;
+  closed_tabs_count: number;
+  unpaid_consumption_total: string;
+  unrefunded_credit_total: string;
+  pending_refunds_count: number;
+  pending_refunds_total: string;
+  incomplete_operations_count: number;
+  open_tabs: ShiftPendencyTabItem[];
+  tabs_with_credit_balance: ShiftPendencyTabItem[];
+  pending_refunds: ShiftPendingRefundItem[];
+  blockers: ShiftCloseBlocker[];
+  can_close: boolean;
+}
+
+export interface ShiftReport {
+  shift: ShiftRecord;
+  summary: FinancialSummary;
+  conference: ShiftConference;
+  pendencies: ShiftPendencies;
+  drawer_movements: DrawerMovementRecord[];
+  ready_to_close?: boolean;
+  validation_errors?: string[];
+}
+
+export interface CurrentShiftState {
+  is_open: boolean;
+  current_shift: ShiftRecord | null;
+  summary: FinancialSummary | null;
+  conference: ShiftConference | null;
+  pendencies: ShiftPendencies | null;
+  drawer_movements: DrawerMovementRecord[];
+  closed_shifts: ShiftRecord[];
 }
 
 /** Converte texto decimal ("18.50" ou "18,50") para centavos inteiros. Retorna null se inválido. */

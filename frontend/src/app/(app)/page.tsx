@@ -1,11 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import ShiftManager from "@/components/ShiftManager";
 import { TabsManager } from "@/components/TabsManager";
 import { ApiError, apiFetch } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import {
   CardFeeMode,
+  CurrentShiftState,
   FinancialSummary,
   PaymentMethod,
   PaymentSettings,
@@ -20,7 +22,7 @@ import {
   parseToCents,
 } from "@/lib/money";
 
-type ActiveTab = "pos" | "tabs" | "history" | "products" | "settings";
+type ActiveTab = "pos" | "tabs" | "shift" | "history" | "products" | "settings";
 
 interface CartItem {
   key: string;
@@ -50,6 +52,7 @@ export default function HomePage() {
   const [sales, setSales] = useState<SaleRecord[]>([]);
   const [tabs, setTabs] = useState<TabRecord[]>([]);
   const [summary, setSummary] = useState<FinancialSummary | null>(null);
+  const [shiftState, setShiftState] = useState<CurrentShiftState | null>(null);
   const [loadingData, setLoadingData] = useState(true);
   const [globalError, setGlobalError] = useState<string | null>(null);
 
@@ -108,11 +111,12 @@ export default function HomePage() {
   const loadAll = useCallback(async () => {
     setGlobalError(null);
     try {
-      const [prodResp, setResp, salesResp, tabsResp] = await Promise.all([
+      const [prodResp, setResp, salesResp, tabsResp, shiftResp] = await Promise.all([
         apiFetch<{ products: Product[] }>("/products"),
         apiFetch<{ settings: PaymentSettings }>("/settings/payment"),
         apiFetch<{ sales: SaleRecord[]; summary: FinancialSummary }>("/sales?limit=50"),
         apiFetch<{ tabs: TabRecord[] }>("/tabs?limit=200"),
+        apiFetch<CurrentShiftState>("/shifts/current"),
       ]);
       setProducts(prodResp.products);
       setSettings(setResp.settings);
@@ -121,6 +125,7 @@ export default function HomePage() {
       setSales(salesResp.sales);
       setSummary(salesResp.summary);
       setTabs(tabsResp.tabs);
+      setShiftState(shiftResp);
     } catch (err) {
       setGlobalError(err instanceof ApiError ? err.message : "Erro ao carregar dados do caixa.");
     } finally {
@@ -642,6 +647,13 @@ export default function HomePage() {
         </button>
         <button
           type="button"
+          className={`nav-tab ${activeTab === "shift" ? "active" : ""}`}
+          onClick={() => setActiveTab("shift")}
+        >
+          Turno de Caixa ({shiftState?.is_open ? "Aberto" : "Fechado"})
+        </button>
+        <button
+          type="button"
           className={`nav-tab ${activeTab === "history" ? "active" : ""}`}
           onClick={() => setActiveTab("history")}
         >
@@ -670,6 +682,26 @@ export default function HomePage() {
       {globalError && (
         <div className="alert alert-error" role="alert">
           {globalError}
+        </div>
+      )}
+
+      {shiftState && !shiftState.is_open && (activeTab === "pos" || activeTab === "tabs") && (
+        <div
+          className="alert alert-warning"
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: "0.5rem",
+          }}
+        >
+          <span>
+            <strong>Atenção:</strong> O caixa está fechado no momento. Abra um novo turno com o fundo inicial antes de registrar vendas ou comandas.
+          </span>
+          <button type="button" className="btn btn-sm" onClick={() => setActiveTab("shift")}>
+            Ir para Abertura de Caixa
+          </button>
         </div>
       )}
 
@@ -1070,6 +1102,20 @@ export default function HomePage() {
           settings={settings}
           isAdmin={isAdmin}
           onDataChanged={loadAll}
+        />
+      )}
+
+      {/* ==================== ABA: TURNO / FECHAMENTO DE CAIXA ==================== */}
+      {activeTab === "shift" && (
+        <ShiftManager
+          shiftState={shiftState}
+          onShiftStateChanged={async (nextState) => {
+            if (nextState) {
+              setShiftState(nextState);
+            }
+            await loadAll();
+          }}
+          onNavigateTab={(tab) => setActiveTab(tab)}
         />
       )}
 

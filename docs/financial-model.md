@@ -194,30 +194,89 @@ $$\text{active\_sales\_subtotal} = \text{principal\_received\_total} + \text{tab
 ### 6.6. Regras de encerramento (`POST /api/tabs/<tab_id>/close`)
 Uma comanda só pode ser encerrada quando:
 1. `status == 'open'`;
-2. `balance_due == 0.00`;
-3. `pending_refund_total == 0.00` (nenhuma devolução pendente ao cliente).
+2. `balance_due == 0.00` (nenhum saldo devedor);
+3. `credit_balance == 0.00` (nenhum saldo de crédito disponível pendente de consumo ou devolução);
+4. `pending_refund_total == 0.00` (nenhuma devolução pendente ao cliente).
 
-Após encerrada, a comanda torna-se estritamente somente leitura (bloqueia novos consumos, pagamentos, cancelamentos ou novo encerramento).
+O objeto `Tab` expõe `can_close: bool` e `close_blockers: list[str]` (`credit_balance_pending`, `balance_due_pending`, `customer_refund_pending`, `already_closed`) para orientar o operador. Após encerrada, a comanda torna-se estritamente somente leitura (bloqueia novos consumos, depósitos, devoluções, pagamentos, cancelamentos ou novo encerramento).
 
 ## 7. Transações, concorrência e idempotência
 
-- Todas as operações de venda rápida e de comanda executam dentro de `MariaDbUnitOfWork`, bloqueando a linha da comanda (`SELECT ... FOR UPDATE`) para serializar operações concorrentes sobre a mesma comanda (impedindo dois pagamentos simultâneos que juntos ultrapassem o saldo ou adição de item simultânea ao encerramento).
+- Todas as operações de venda rápida e de comanda executam dentro de `MariaDbUnitOfWork`, bloqueando a linha da comanda (`SELECT ... FOR UPDATE`) para serializar operações concorrentes sobre a mesma comanda (impedindo dois pagamentos ou devoluções simultâneas que juntos ultrapassem o saldo ou adição de item simultânea ao encerramento).
 - `idempotency_key` + `request_fingerprint` (SHA-256 canônico) são verificados em:
   - `sales` (venda rápida e lançamento de consumo em comanda);
-  - `cash_movements.batch_key` (pagamento parcial ou dividido de comanda).
+  - `cash_movements.batch_key` / `cash_movements.idempotency_key` (pagamento parcial/dividido de comanda, depósito antecipado de crédito e devolução de saldo de crédito).
 - Reenvio com mesmo payload retorna `200 OK` com `idempotent_replay = true`; reenvio da mesma chave com payload diferente retorna `409 Conflict` (`idempotency_conflict`).
 
-## 8. Integração futura com Crédito Antecipado (Bloco 4) e Fechamento de Caixa (Bloco 5)
+## 8. Crédito Antecipado, Consumo e Devolução de Saldo (Bloco 4)
 
-### 8.1. Preparação para Crédito Antecipado na Comanda (Bloco 4)
-O esquema atual já contém os tipos de movimento `credit_deposit` e `credit_refund` no `ENUM` de `cash_movements.kind`. No Bloco 4:
-1. Quando o cliente depositar um valor antecipado na comanda (ex.: coloca R$ 100,00 ao abrir a ficha), o recebimento será gravado em `cash_movements` com `tab_id = tabs.id`, `kind = 'credit_deposit'`, `direction = 'in'` (ou convertendo o excesso autorizado de pagamento em crédito da comanda).
-2. O saldo da comanda passará a expor dois indicadores complementares derivados do mesmo livro-razão:
-   - `balance_due = max(0, consumed_subtotal - net_paid_and_credited_principal)` (saldo devedor a pagar);
-   - `credit_balance = max(0, net_paid_and_credited_principal - consumed_subtotal)` (crédito disponível a consumir ou devolver).
-3. Enquanto houver `credit_balance > 0`, o encerramento da comanda exigirá ou o consumo desse saldo ou a devolução explícita do troco/sobra ao cliente via `cash_movements` (`kind = 'credit_refund'`, `direction = 'out'`), zerando a obrigação antes de fechar a comanda.
+### 8.1. Distinção contábil e de caixa: Depósito × Consumo × Devolução
+O Bloco 4 permite que um cliente deposite dinheiro antecipadamente em uma comanda aberta (`kind = 'credit_deposit'`, `direction = 'in'`), consuma produtos utilizando esse crédito e receba eventual saldo restante de volta (`kind = 'credit_refund'`, `direction = 'out'`), inclusive por método diferente do depósito original:
 
-### 8.2. Impacto no Fechamento de Caixa (Bloco 5)
-- Como vendas rápidas e comandas compartilham as tabelas `sales` e `cash_movements` vinculadas a `shift_id`, o fechamento de caixa no Bloco 5 consultará um único livro-razão:
-  - **Entradas e saídas físicas por método (`net_gross`)**: refletem exatamente o dinheiro na gaveta (`opening_cash + by_method.cash.net_gross`) e os valores liquidados em Pix e Cartão, incluindo pagamentos parciais de comandas.
-  - **Verificação de pendências de turno**: o fechamento poderá alertar ou bloquear o encerramento do turno caso existam comandas ainda abertas (`tabs_open_count > 0` ou `tabs_pending_balance_total > 0`) ou devoluções financeiras pendentes ao cliente (`pending_customer_refunds_count > 0`).
+1. **Depósito antecipado (`POST /api/tabs/<tab_id>/credits`):**
+   - Registra entrada financeira em `cash_movements` com `tab_id = tabs.id`, `sale_id = NULL`, `kind = 'credit_deposit'`, `direction = 'in'`.
+   - É um **passivo de crédito perante o cliente**, e **não** uma venda de produtos (não altera `active_sales_subtotal`).
+   - Aceita `pix`, `cash` (com `cash_tendered` e `change_given`) ou `card` (inclusive dividido).
+   - **Taxa de cartão em depósitos:** incide apenas sobre a parcela paga no cartão usando a configuração vigente (`payment_settings`), é repassada ao cliente (`gross_amount = amount + fee_amount`) e **não aumenta o saldo de crédito disponível** (`credit_deposited` soma apenas o principal `amount`).
+2. **Aplicação automática do crédito ao consumo (`POST /api/tabs/<tab_id>/items`):**
+   - **Regra central:** consumir crédito **não** significa receber novamente o valor e **não cria um novo movimento em `cash_movements`**.
+   - A aplicação é **automática e determinística** a partir do estado persistido da comanda: todo consumo ativo (`sales` com `kind = 'tab_item'` e `status = 'active'`) reduz automaticamente o saldo de crédito disponível até o limite do pool líquido de crédito da comanda.
+   - Caso o consumo acumulado supere o crédito disponível, o excedente torna-se `balance_due` (saldo a pagar), que pode ser quitado parcial ou integralmente via `POST /api/tabs/<tab_id>/payments` (`kind = 'sale_payment'`).
+3. **Devolução de saldo de crédito (`POST /api/tabs/<tab_id>/credit-refunds`):**
+   - Permite devolver parcial ou integralmente o `credit_balance` disponível ao cliente por `pix`, `cash` ou `card`, mesmo que diferente do método do depósito original.
+   - Registra saída financeira real em `cash_movements` com `tab_id = tabs.id`, `sale_id = NULL`, `kind = 'credit_refund'`, `direction = 'out'`, `fee_amount = 0.00`, `gross_amount = amount`.
+   - Bloqueia qualquer devolução superior ao `credit_balance` atual (`409 Conflict` / `insufficient_credit`) sob bloqueio pessimista (`SELECT ... FOR UPDATE`).
+
+### 8.2. Fórmulas de Saldo da Comanda e Invariantes de Reconciliação
+Para cada comanda, sejam:
+- $C = \text{subtotal\_consumed}$: soma dos `sales.subtotal` ativos (`kind = 'tab_item'`, `status = 'active'`);
+- $P_{\text{ord}}$: principal líquido de pagamentos ordinários (`kind = 'sale_payment'` menos estornos `kind = 'reversal'` vinculados a esses pagamentos), limitado a $C$: $\text{principal\_paid} = \min(C, P_{\text{ord}})$;
+- $D_{\text{net}} = \text{credit\_deposited} = \max(0, D_{\text{in}} - D_{\text{rev}})$: principal líquido de depósitos de crédito (`kind = 'credit_deposit'` menos estornos administrativos `kind = 'reversal'` vinculados a depósitos);
+- $R_{\text{credit}} = \text{credit\_refunded}$: soma das devoluções de saldo de crédito (`kind = 'credit_refund'`, `direction = 'out'`);
+- $K_{\text{pool}} = \max(0, D_{\text{net}} - R_{\text{credit}})$: pool de crédito líquido disponível para cobrir consumo na comanda.
+
+Então os saldos derivados da comanda são:
+$$\text{credit\_applied} = \min(C - \text{principal\_paid},\ K_{\text{pool}})$$
+$$\text{credit\_balance} = \max(0,\ K_{\text{pool}} - \text{credit\_applied})$$
+$$\text{settled\_subtotal} = \text{principal\_paid} + \text{credit\_applied}$$
+$$\text{balance\_due} = \max(0,\ C - \text{settled\_subtotal})$$
+
+Essas definições garantem duas identidades globais exatas no resumo financeiro (`GET /api/sales/summary`):
+
+1. **Identidade Global das Vendas Ativas:**
+   $$\text{active\_sales\_subtotal} = \text{quick\_sales\_subtotal} + \text{tabs\_consumed\_subtotal} = \text{principal\_received\_total} + \text{tabs\_credit\_applied\_total} + \text{tabs\_pending\_balance\_total}$$
+2. **Identidade Global do Passivo de Crédito Antecipado:**
+   $$\text{tabs\_credit\_deposited\_total} = \text{tabs\_credit\_applied\_total} + \text{tabs\_credit\_refunded\_total} + \text{tabs\_credit\_balance\_total}$$
+
+### 8.3. Exemplo Completo de Reconciliação (Comanda 15)
+1. Abertura da Comanda 15 (`credit_balance = 0.00`, `balance_due = 0.00`).
+2. Depósito antecipado de R$ 50,00 via Pix (`kind = 'credit_deposit'`, `direction = 'in'`, `method = 'pix'`, `amount = 50.00`):
+   - `credit_deposited = 50.00`, `credit_balance = 50.00`, `active_sales_subtotal = 0.00`.
+3. Consumo de R$ 20,00 + Consumo de R$ 12,00 (`subtotal_consumed = 32.00`):
+   - `credit_applied = 32.00`, `credit_balance = 18.00`, `balance_due = 0.00`, `active_sales_subtotal = 32.00` (nenhuma nova entrada de caixa é criada).
+4. Devolução do saldo restante de R$ 18,00 em dinheiro (`kind = 'credit_refund'`, `direction = 'out'`, `method = 'cash'`, `amount = 18.00`):
+   - `credit_refunded = 18.00`, `credit_balance = 0.00`, `balance_due = 0.00`, `can_close = True`.
+5. Encerramento da Comanda 15 e reconciliação por método:
+   - Produtos vendidos (`active_sales_subtotal`): **R$ 32,00**
+   - Pix (`in_gross` / `out_gross` / `net_gross`): **+R$ 50,00 / R$ 0,00 / +R$ 50,00**
+   - Dinheiro (`in_gross` / `out_gross` / `net_gross`): **R$ 0,00 / -R$ 18,00 / -R$ 18,00**
+   - Recebimento líquido total em caixa (`net_received_total`): **R$ 32,00**
+   - Saldo de crédito pendente (`tabs_credit_balance_total`): **R$ 0,00**
+   - Saldo devedor pendente (`tabs_pending_balance_total`): **R$ 0,00**
+
+### 8.4. Cancelamentos e Estornos com Crédito Antecipado
+- **Estorno administrativo de depósito (`POST /api/tabs/<tab_id>/credits/<movement_id>/void`, somente Admin):**
+  - Exige motivo obrigatório, comanda aberta e turno aberto.
+  - Verifica se o cancelamento não deixaria o pool líquido de depósitos menor que o total já devolvido via `credit_refund`.
+  - **Separação entre cancelamento contábil e saída financeira física**:
+    - Quando `customer_refund_completed = false` (padrão), o depósito é cancelado contabilmente no próprio registro (`voided_by`, `voided_at`, `void_reason`, `customer_refund_status = 'pending'`, `customer_refund_amount = gross_amount`). O crédito disponível da comanda (`credit_deposited`) é reduzido imediatamente e a obrigação de devolução fica registrada em `pending_refund_total` e `pending_customer_refunds_total` (bloqueando o encerramento da comanda), **sem inserir movimento `direction = 'out'` e sem reduzir artificialmente o caixa físico (`net_gross`) antes da devolução efetiva**.
+    - Quando a devolução financeira ocorre no ato (`customer_refund_completed = true`) ou é confirmada posteriormente via `POST /api/tabs/<tab_id>/credits/<movement_id>/customer-refund`, o status passa para `completed` e o sistema insere o movimento `kind = 'reversal'`, `direction = 'out'`, `reverses_id = movement_id` (revertendo também a taxa de cartão apenas se o estorno ocorrer na maquininha), sem reduzir `credit_deposited` uma segunda vez.
+  - Recalcula imediatamente `credit_deposited`, `credit_applied`, `credit_balance` e `balance_due` (se parte do depósito cancelado já cobria consumo, a diferença passa automaticamente para `balance_due`).
+- **Cancelamento de consumo pago com crédito (`POST /api/tabs/<tab_id>/items/<sale_id>/void`, somente Admin):**
+  - Quando o consumo cancelado estava coberto por crédito antecipado, a redução de `subtotal_consumed` reduz `credit_applied` e **restaura automaticamente o crédito em `credit_balance`**, sem gerar movimentos fictícios de entrada ou saída em `cash_movements` (`customer_refund_status = 'not_applicable'`).
+  - Quando o consumo cancelado estava parcialmente coberto por crédito e parcialmente pago por pagamento complementar (`sale_payment`), o crédito é restaurado ao `credit_balance` e apenas eventual excesso de `sale_payment` sobre o consumo remanescente gera devolução financeira ao cliente (`pending` ou `completed`).
+
+## 9. Impacto no Fechamento de Caixa (Bloco 5)
+- Como vendas rápidas, comandas, depósitos antecipados e devoluções compartilham as tabelas `sales` e `cash_movements` vinculadas a `shift_id`, o fechamento de caixa no Bloco 5 consultará um único livro-razão:
+  - **Entradas, saídas e líquido por método (`in_gross`, `out_gross`, `net_gross`)**: refletem exatamente o dinheiro físico na gaveta (`opening_cash + by_method.cash.net_gross`, já descontadas devoluções em espécie de crédito ou estornos) e os valores liquidados em Pix e Cartão.
+  - **Verificação de pendências de turno**: o fechamento poderá inspecionar `tabs_open_count`, `tabs_pending_balance_total`, `tabs_credit_balance_total` e `pending_customer_refunds_count`.

@@ -1,0 +1,8 @@
+# Sobreposição de PRODUÇÃO.
+# O banco não publica nenhuma porta. Somente o proxy expõe 80/443.
+services:
+  proxy:
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"

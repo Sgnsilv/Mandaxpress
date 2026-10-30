@@ -1,0 +1,33 @@
+# Sobreposição de DESENVOLVIMENTO.
+# - Publica o banco somente em 127.0.0.1 (nunca em 0.0.0.0).
+# - Cria o banco de testes (apenas em volumes novos; ver database/dev-init).
+# - Define o serviço "test" (docker compose run --rm test).
+services:
+  db:
+    ports:
+      - "127.0.0.1:${DB_HOST_PORT:-3307}:3306"
+    volumes:
+      - ./database/dev-init:/docker-entrypoint-initdb.d:ro
+
+  proxy:
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: test
+    environment:
+      APP_ENV: testing
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_NAME: ${MARIADB_DATABASE}_test
+      DB_USER: ${MARIADB_USER}
+      DB_PASSWORD: ${MARIADB_PASSWORD}
+      ALLOWED_ORIGINS: http://localhost:8080
+      COOKIE_SECURE: "false"
+    depends_on:
+      db:
+        condition: service_healthy

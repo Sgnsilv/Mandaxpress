@@ -1,0 +1,24 @@
+# Entrada única do Mandaxpress: frontend em "/" e API em "/api" na MESMA origem
+# (simplifica cookies e CSRF). SITE_ADDRESS=":80" => HTTP; com um domínio, o Caddy
+# obtém e renova o certificado HTTPS automaticamente.
+# (A API de administração do Caddy fica só em localhost dentro do container,
+#  usada pelo healthcheck.)
+
+{$SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy same-origin
+		-Server
+	}
+
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

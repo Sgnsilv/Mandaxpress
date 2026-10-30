@@ -98,6 +98,15 @@ def _serialize_movement(m: CashMovement) -> dict:
         "idempotency_key": m.idempotency_key,
         "batch_key": m.batch_key,
         "note": m.note,
+        "voided_by": m.voided_by,
+        "voided_at": m.voided_at.isoformat() if m.voided_at else None,
+        "void_reason": m.void_reason,
+        "customer_refund_status": m.customer_refund_status.value,
+        "customer_refund_amount": f"{m.customer_refund_amount:.2f}",
+        "customer_refunded_at": m.customer_refunded_at.isoformat() if m.customer_refunded_at else None,
+        "customer_refunded_by": m.customer_refunded_by,
+        "customer_refund_method": m.customer_refund_method.value if m.customer_refund_method else None,
+        "customer_refund_notes": m.customer_refund_notes,
     }
 
 
@@ -176,6 +185,14 @@ def list_sales():
         "sales": [_serialize_sale(s) for s in sales],
         "summary": summary,
     })
+
+
+@bp.get("/summary")
+@login_required()
+def get_sales_summary():
+    container = current_app.extensions["mx_container"]
+    summary = container.sales.get_financial_summary()
+    return jsonify({"summary": summary})
 
 
 @bp.get("/<int:sale_id>")

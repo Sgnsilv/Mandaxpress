@@ -1,4 +1,4 @@
-"""Rotas de comandas abertas, lançamentos incrementais, pagamentos parciais e encerramento: /api/tabs/*"""
+"""Rotas de comandas abertas, lançamentos incrementais, pagamentos parciais, crédito antecipado e encerramento: /api/tabs/*"""
 from typing import List, Optional, Union
 
 from flask import Blueprint, current_app, g, jsonify, request
@@ -38,6 +38,34 @@ class RecordTabPaymentRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=64)
     payments: List[SalePaymentRequest] = Field(min_length=1, max_length=20)
     note: Optional[str] = Field(default=None, max_length=255)
+
+
+class RecordTabCreditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=8, max_length=64)
+    payments: Optional[List[SalePaymentRequest]] = Field(default=None, min_length=1, max_length=20)
+    method: Optional[str] = Field(default=None, min_length=1, max_length=16)
+    amount: Optional[Union[str, int, float]] = None
+    cash_tendered: Optional[Union[str, int, float]] = None
+    note: Optional[str] = Field(default=None, max_length=255)
+
+
+class RefundTabCreditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=8, max_length=64)
+    method: str = Field(min_length=1, max_length=16)
+    amount: Union[str, int, float]
+    note: Optional[str] = Field(default=None, max_length=255)
+
+
+class VoidTabCreditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=3, max_length=255)
+    customer_refund_completed: bool = False
+    customer_refund_method: Optional[str] = Field(default=None, max_length=16)
+    customer_refund_notes: Optional[str] = Field(default=None, max_length=255)
+    refund_method: Optional[str] = Field(default=None, max_length=16)
+    notes: Optional[str] = Field(default=None, max_length=255)
 
 
 class CloseTabRequest(BaseModel):
@@ -82,14 +110,24 @@ def _serialize_tab(t: Tab) -> dict:
         "voided_subtotal": f"{t.voided_subtotal:.2f}",
         "principal_paid": f"{t.principal_paid:.2f}",
         "net_principal_paid": f"{t.net_principal_paid:.2f}",
+        "credit_deposited": f"{t.credit_deposited:.2f}",
+        "credit_card_fee_paid": f"{t.credit_card_fee_paid:.2f}",
+        "credit_applied": f"{t.credit_applied:.2f}",
+        "credit_refunded": f"{t.credit_refunded:.2f}",
+        "credit_balance": f"{t.credit_balance:.2f}",
+        "sale_card_fee_paid": f"{t.sale_card_fee_paid:.2f}",
         "card_fee_paid": f"{t.card_fee_paid:.2f}",
         "total_charged_paid": f"{t.total_charged_paid:.2f}",
+        "settled_subtotal": f"{t.settled_subtotal:.2f}",
         "balance_due": f"{t.balance_due:.2f}",
         "pending_refund_total": f"{t.pending_refund_total:.2f}",
         "completed_refund_total": f"{t.completed_refund_total:.2f}",
         "can_close": t.can_close,
+        "close_blockers": t.close_blockers,
         "launches": [_serialize_sale(s) for s in t.launches],
         "payments": [_serialize_movement(m) for m in t.payments],
+        "credit_deposits": [_serialize_movement(m) for m in t.credit_deposits],
+        "credit_refunds": [_serialize_movement(m) for m in t.credit_refunds],
     }
 
 
@@ -209,6 +247,110 @@ def record_tab_payment(tab_id: int):
         "payments": [_serialize_movement(m) for m in movements],
         "idempotent_replay": not created_now,
     }), status_code
+
+
+@bp.post("/<int:tab_id>/credits")
+@login_required()
+def record_tab_credit(tab_id: int):
+    data = _parse_model(RecordTabCreditRequest)
+    container = current_app.extensions["mx_container"]
+
+    if data.payments is not None:
+        payments = [
+            QuickSalePaymentInput(
+                method=pay.method,
+                amount=pay.amount,
+                cash_tendered=pay.cash_tendered,
+            )
+            for pay in data.payments
+        ]
+    elif data.method is not None and data.amount is not None:
+        payments = [
+            QuickSalePaymentInput(
+                method=data.method,
+                amount=data.amount,
+                cash_tendered=data.cash_tendered,
+            )
+        ]
+    else:
+        raise RequestValidationError([
+            {"field": "payments", "message": "Informe 'payments' ou 'method' + 'amount'."}
+        ])
+
+    tab, movements, created_now = container.tabs.record_credit_deposit(
+        actor=g.auth.user,
+        tab_id=tab_id,
+        idempotency_key=data.idempotency_key,
+        payments=payments,
+        note=data.note,
+    )
+    status_code = 201 if created_now else 200
+    return jsonify({
+        "tab": _serialize_tab(tab),
+        "credit_deposits": [_serialize_movement(m) for m in movements],
+        "idempotent_replay": not created_now,
+    }), status_code
+
+
+@bp.post("/<int:tab_id>/credit-refunds")
+@login_required()
+def refund_tab_credit(tab_id: int):
+    data = _parse_model(RefundTabCreditRequest)
+    container = current_app.extensions["mx_container"]
+    tab, movement, created_now = container.tabs.refund_credit(
+        actor=g.auth.user,
+        tab_id=tab_id,
+        idempotency_key=data.idempotency_key,
+        method=data.method,
+        amount=data.amount,
+        note=data.note,
+    )
+    status_code = 201 if created_now else 200
+    return jsonify({
+        "tab": _serialize_tab(tab),
+        "credit_refund": _serialize_movement(movement),
+        "idempotent_replay": not created_now,
+    }), status_code
+
+
+@bp.post("/<int:tab_id>/credits/<int:movement_id>/void")
+@login_required(Role.ADMIN)
+def void_tab_credit(tab_id: int, movement_id: int):
+    data = _parse_model(VoidTabCreditRequest)
+    container = current_app.extensions["mx_container"]
+    tab, reversal = container.tabs.void_credit_deposit(
+        actor=g.auth.user,
+        tab_id=tab_id,
+        movement_id=movement_id,
+        reason=data.reason,
+        customer_refund_completed=data.customer_refund_completed,
+        customer_refund_method=data.customer_refund_method,
+        customer_refund_notes=data.customer_refund_notes,
+        refund_method=data.refund_method,
+        notes=data.notes,
+    )
+    return jsonify({
+        "tab": _serialize_tab(tab),
+        "reversal": _serialize_movement(reversal) if reversal else None,
+    })
+
+
+@bp.post("/<int:tab_id>/credits/<int:movement_id>/customer-refund")
+@login_required(Role.ADMIN)
+def confirm_tab_credit_refund(tab_id: int, movement_id: int):
+    data = _parse_model(ConfirmCustomerRefundRequest)
+    container = current_app.extensions["mx_container"]
+    tab, reversal = container.tabs.confirm_credit_deposit_refund(
+        actor=g.auth.user,
+        tab_id=tab_id,
+        movement_id=movement_id,
+        method=data.method,
+        notes=data.notes,
+    )
+    return jsonify({
+        "tab": _serialize_tab(tab),
+        "reversal": _serialize_movement(reversal),
+    })
 
 
 @bp.post("/<int:tab_id>/close")

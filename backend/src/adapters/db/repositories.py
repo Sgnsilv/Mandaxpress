@@ -123,6 +123,19 @@ def _row_to_cash_movement(row: dict) -> CashMovement:
         note=row.get("note"),
         batch_key=row.get("batch_key"),
         request_fingerprint=row.get("request_fingerprint"),
+        voided_by=row.get("voided_by"),
+        voided_at=row.get("voided_at"),
+        void_reason=row.get("void_reason"),
+        customer_refund_status=CustomerRefundStatus(row.get("customer_refund_status", "not_applicable")),
+        customer_refund_amount=Decimal(str(row.get("customer_refund_amount", "0.00"))),
+        customer_refunded_at=row.get("customer_refunded_at"),
+        customer_refunded_by=row.get("customer_refunded_by"),
+        customer_refund_method=(
+            PaymentMethod(row["customer_refund_method"])
+            if row.get("customer_refund_method")
+            else None
+        ),
+        customer_refund_notes=row.get("customer_refund_notes"),
     )
 
 
@@ -658,6 +671,17 @@ class MariaDbTabRepository(TabRepository):
             ZERO,
         )
 
+        sale_payment_ids = {
+            m.id
+            for m in payments
+            if m.direction == CashDirection.IN and m.kind == CashMovementKind.SALE_PAYMENT
+        }
+        credit_deposit_ids = {
+            m.id
+            for m in payments
+            if m.direction == CashDirection.IN and m.kind == CashMovementKind.CREDIT_DEPOSIT
+        }
+
         in_principal = sum(
             (
                 m.amount
@@ -670,13 +694,15 @@ class MariaDbTabRepository(TabRepository):
             (
                 m.amount
                 for m in payments
-                if m.direction == CashDirection.OUT and m.kind == CashMovementKind.REVERSAL
+                if m.direction == CashDirection.OUT
+                and m.kind == CashMovementKind.REVERSAL
+                and (m.reverses_id in sale_payment_ids or m.reverses_id is None)
             ),
             ZERO,
         )
         net_principal_paid = in_principal - out_principal
 
-        in_fee = sum(
+        in_sale_fee = sum(
             (
                 m.fee_amount
                 for m in payments
@@ -684,18 +710,73 @@ class MariaDbTabRepository(TabRepository):
             ),
             ZERO,
         )
-        out_fee = sum(
+        out_sale_fee = sum(
             (
                 m.fee_amount
                 for m in payments
-                if m.direction == CashDirection.OUT and m.kind == CashMovementKind.REVERSAL
+                if m.direction == CashDirection.OUT
+                and m.kind == CashMovementKind.REVERSAL
+                and (m.reverses_id in sale_payment_ids or m.reverses_id is None)
             ),
             ZERO,
         )
-        card_fee_paid = in_fee - out_fee
-        total_charged_paid = net_principal_paid + card_fee_paid
+        sale_card_fee_paid = in_sale_fee - out_sale_fee
 
-        pending_refund_total = sum(
+        voided_credit_ids = {
+            m.reverses_id
+            for m in payments
+            if m.direction == CashDirection.OUT
+            and m.kind == CashMovementKind.REVERSAL
+            and m.reverses_id in credit_deposit_ids
+        } | {
+            m.id
+            for m in payments
+            if m.direction == CashDirection.IN
+            and m.kind == CashMovementKind.CREDIT_DEPOSIT
+            and m.voided_at is not None
+        }
+        credit_deposited = sum(
+            (
+                m.amount
+                for m in payments
+                if m.direction == CashDirection.IN
+                and m.kind == CashMovementKind.CREDIT_DEPOSIT
+                and m.id not in voided_credit_ids
+            ),
+            ZERO,
+        )
+
+        in_credit_fee = sum(
+            (
+                m.fee_amount
+                for m in payments
+                if m.direction == CashDirection.IN and m.kind == CashMovementKind.CREDIT_DEPOSIT
+            ),
+            ZERO,
+        )
+        out_credit_fee = sum(
+            (
+                m.fee_amount
+                for m in payments
+                if m.direction == CashDirection.OUT
+                and m.kind == CashMovementKind.REVERSAL
+                and m.reverses_id in credit_deposit_ids
+            ),
+            ZERO,
+        )
+        credit_card_fee_paid = in_credit_fee - out_credit_fee
+
+        credit_refunded = sum(
+            (
+                m.amount
+                for m in payments
+                if m.direction == CashDirection.OUT and m.kind == CashMovementKind.CREDIT_REFUND
+            ),
+            ZERO,
+        )
+        credit_pool = max(ZERO, credit_deposited - credit_refunded)
+
+        pending_sale_refund_total = sum(
             (
                 s.customer_refund_amount
                 for s in launches
@@ -703,7 +784,20 @@ class MariaDbTabRepository(TabRepository):
             ),
             ZERO,
         )
-        completed_refund_total = sum(
+        pending_credit_refund_total = sum(
+            (
+                m.customer_refund_amount
+                for m in payments
+                if m.direction == CashDirection.IN
+                and m.kind == CashMovementKind.CREDIT_DEPOSIT
+                and m.voided_at is not None
+                and m.customer_refund_status == CustomerRefundStatus.PENDING
+            ),
+            ZERO,
+        )
+        pending_refund_total = pending_sale_refund_total + pending_credit_refund_total
+
+        completed_sale_refund_total = sum(
             (
                 s.customer_refund_amount
                 for s in launches
@@ -711,9 +805,50 @@ class MariaDbTabRepository(TabRepository):
             ),
             ZERO,
         )
+        completed_credit_refund_total = sum(
+            (
+                m.customer_refund_amount
+                for m in payments
+                if m.direction == CashDirection.IN
+                and m.kind == CashMovementKind.CREDIT_DEPOSIT
+                and m.voided_at is not None
+                and m.customer_refund_status == CustomerRefundStatus.COMPLETED
+            ),
+            ZERO,
+        )
+        completed_refund_total = completed_sale_refund_total + completed_credit_refund_total
 
-        principal_paid = min(subtotal_consumed, max(ZERO, net_principal_paid))
-        balance_due = max(ZERO, subtotal_consumed - principal_paid)
+        active_ordinary_principal = max(ZERO, net_principal_paid - pending_sale_refund_total)
+        principal_paid = min(subtotal_consumed, active_ordinary_principal)
+        unpaid_by_ordinary = max(ZERO, subtotal_consumed - principal_paid)
+        credit_applied = min(unpaid_by_ordinary, credit_pool)
+        credit_balance = max(ZERO, credit_pool - credit_applied)
+        settled_subtotal = principal_paid + credit_applied
+        balance_due = max(ZERO, subtotal_consumed - settled_subtotal)
+
+        card_fee_paid = sale_card_fee_paid + credit_card_fee_paid
+        total_charged_paid = net_principal_paid + credit_pool + card_fee_paid
+
+        ordinary_payments = [
+            m
+            for m in payments
+            if m.kind == CashMovementKind.SALE_PAYMENT
+            or (
+                m.kind == CashMovementKind.REVERSAL
+                and (m.reverses_id in sale_payment_ids or m.reverses_id is None)
+            )
+        ]
+        credit_deposits = [
+            m
+            for m in payments
+            if m.kind == CashMovementKind.CREDIT_DEPOSIT
+            or (m.kind == CashMovementKind.REVERSAL and m.reverses_id in credit_deposit_ids)
+        ]
+        credit_refunds = [
+            m
+            for m in payments
+            if m.kind == CashMovementKind.CREDIT_REFUND
+        ]
 
         return Tab(
             id=tab_id,
@@ -728,15 +863,24 @@ class MariaDbTabRepository(TabRepository):
             notes=row.get("notes"),
             subtotal_consumed=subtotal_consumed,
             voided_subtotal=voided_subtotal,
+            credit_deposited=credit_deposited,
+            credit_card_fee_paid=credit_card_fee_paid,
+            credit_applied=credit_applied,
+            credit_refunded=credit_refunded,
+            credit_balance=credit_balance,
             principal_paid=principal_paid,
             net_principal_paid=net_principal_paid,
+            sale_card_fee_paid=sale_card_fee_paid,
             card_fee_paid=card_fee_paid,
             total_charged_paid=total_charged_paid,
+            settled_subtotal=settled_subtotal,
             balance_due=balance_due,
             pending_refund_total=pending_refund_total,
             completed_refund_total=completed_refund_total,
             launches=launches,
-            payments=payments,
+            payments=ordinary_payments,
+            credit_deposits=credit_deposits,
+            credit_refunds=credit_refunds,
         )
 
     def create_tab(
@@ -965,6 +1109,54 @@ class MariaDbCashMovementRepository(CashMovementRepository):
             rows = cur.fetchall()
         return [_row_to_cash_movement(r) for r in rows]
 
+    def mark_credit_deposit_voided(
+        self,
+        movement_id: int,
+        voided_by: int,
+        voided_at: datetime,
+        reason: str,
+        customer_refund_status: CustomerRefundStatus,
+        customer_refund_amount: Decimal,
+        customer_refund_method: Optional[PaymentMethod] = None,
+        customer_refund_notes: Optional[str] = None,
+    ) -> None:
+        is_completed = customer_refund_status == CustomerRefundStatus.COMPLETED
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE cash_movements SET voided_by = %s, voided_at = %s, void_reason = %s, "
+                "customer_refund_status = %s, customer_refund_amount = %s, "
+                "customer_refunded_at = %s, customer_refunded_by = %s, "
+                "customer_refund_method = %s, customer_refund_notes = %s WHERE id = %s",
+                (
+                    voided_by,
+                    voided_at,
+                    reason,
+                    customer_refund_status.value,
+                    str(customer_refund_amount),
+                    voided_at if is_completed else None,
+                    voided_by if is_completed else None,
+                    customer_refund_method.value if (is_completed and customer_refund_method) else None,
+                    customer_refund_notes if is_completed else None,
+                    movement_id,
+                ),
+            )
+
+    def mark_credit_deposit_refunded(
+        self,
+        movement_id: int,
+        refunded_by: int,
+        refunded_at: datetime,
+        method: PaymentMethod,
+        notes: Optional[str] = None,
+    ) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE cash_movements SET customer_refund_status = 'completed', "
+                "customer_refunded_by = %s, customer_refunded_at = %s, "
+                "customer_refund_method = %s, customer_refund_notes = %s WHERE id = %s",
+                (refunded_by, refunded_at, method.value, notes, movement_id),
+            )
+
     def get_financial_summary(self, shift_id: Optional[int] = None) -> dict:
         where_sales = "WHERE shift_id = %s" if shift_id is not None else ""
         params_sales = (shift_id,) if shift_id is not None else ()
@@ -991,19 +1183,22 @@ class MariaDbCashMovementRepository(CashMovementRepository):
                 "COALESCE(SUM(CASE "
                 "  WHEN m.tab_id IS NULL AND m.direction = 'in' AND m.kind = 'sale_payment' AND s.status = 'active' THEN m.amount "
                 "  WHEN m.tab_id IS NOT NULL AND m.direction = 'in' AND m.kind = 'sale_payment' THEN m.amount "
-                "  WHEN m.tab_id IS NOT NULL AND m.direction = 'out' AND m.kind = 'reversal' THEN -m.amount "
+                "  WHEN m.tab_id IS NOT NULL AND m.direction = 'out' AND m.kind = 'reversal' "
+                "       AND (orig.kind = 'sale_payment' OR orig.id IS NULL) THEN -m.amount "
                 "  ELSE 0 "
                 "END), 0.00) AS recognized_principal, "
                 "COALESCE(SUM(CASE "
                 "  WHEN m.tab_id IS NULL AND m.direction = 'in' AND m.kind = 'sale_payment' AND s.status = 'active' THEN m.fee_amount "
                 "  WHEN m.tab_id IS NOT NULL AND m.direction = 'in' AND m.kind = 'sale_payment' THEN m.fee_amount "
-                "  WHEN m.tab_id IS NOT NULL AND m.direction = 'out' AND m.kind = 'reversal' THEN -m.fee_amount "
+                "  WHEN m.tab_id IS NOT NULL AND m.direction = 'out' AND m.kind = 'reversal' "
+                "       AND (orig.kind = 'sale_payment' OR orig.id IS NULL) THEN -m.fee_amount "
                 "  ELSE 0 "
                 "END), 0.00) AS recognized_fee, "
                 "COALESCE(SUM(CASE "
                 "  WHEN m.tab_id IS NULL AND m.direction = 'in' AND m.kind = 'sale_payment' AND s.status = 'active' THEN m.gross_amount "
                 "  WHEN m.tab_id IS NOT NULL AND m.direction = 'in' AND m.kind = 'sale_payment' THEN m.gross_amount "
-                "  WHEN m.tab_id IS NOT NULL AND m.direction = 'out' AND m.kind = 'reversal' THEN -m.gross_amount "
+                "  WHEN m.tab_id IS NOT NULL AND m.direction = 'out' AND m.kind = 'reversal' "
+                "       AND (orig.kind = 'sale_payment' OR orig.id IS NULL) THEN -m.gross_amount "
                 "  ELSE 0 "
                 "END), 0.00) AS recognized_gross, "
                 "COALESCE(SUM(CASE "
@@ -1018,15 +1213,27 @@ class MariaDbCashMovementRepository(CashMovementRepository):
                 "  WHEN m.direction = 'in' THEN m.gross_amount "
                 "  ELSE -m.gross_amount "
                 "END), 0.00) AS net_gross, "
-                "COALESCE(SUM(CASE "
-                "  WHEN m.direction = 'in' THEN m.fee_amount "
-                "  ELSE 0 "
-                "END), 0.00) AS charged_fee, "
-                "COALESCE(SUM(CASE "
-                "  WHEN m.direction = 'out' THEN m.fee_amount "
-                "  ELSE 0 "
-                "END), 0.00) AS reversed_fee "
-                f"FROM cash_movements m LEFT JOIN sales s ON s.id = m.sale_id {where_mov} GROUP BY m.method",
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' THEN m.amount ELSE 0 END), 0.00) AS inflow_principal, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' THEN m.fee_amount ELSE 0 END), 0.00) AS inflow_fee, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' THEN m.gross_amount ELSE 0 END), 0.00) AS inflow_gross, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'out' THEN m.amount ELSE 0 END), 0.00) AS outflow_principal, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'out' THEN m.fee_amount ELSE 0 END), 0.00) AS outflow_fee, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'out' THEN m.gross_amount ELSE 0 END), 0.00) AS outflow_gross, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'sale_payment' THEN m.gross_amount ELSE 0 END), 0.00) AS sale_payment_in_gross, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'credit_deposit' THEN m.amount ELSE 0 END), 0.00) AS credit_deposit_in_principal, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'credit_deposit' THEN m.fee_amount ELSE 0 END), 0.00) AS credit_deposit_in_fee, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'credit_deposit' THEN m.gross_amount ELSE 0 END), 0.00) AS credit_deposit_in_gross, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'out' AND m.kind = 'credit_refund' THEN m.gross_amount ELSE 0 END), 0.00) AS credit_refund_out_gross, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'out' AND m.kind = 'reversal' THEN m.gross_amount ELSE 0 END), 0.00) AS reversal_out_gross, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'sale_payment' THEN m.fee_amount ELSE 0 END), 0.00) AS sale_charged_fee, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'credit_deposit' THEN m.fee_amount ELSE 0 END), 0.00) AS credit_charged_fee, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' THEN m.fee_amount ELSE 0 END), 0.00) AS charged_fee, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'out' THEN m.fee_amount ELSE 0 END), 0.00) AS reversed_fee, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' THEN COALESCE(m.change_given, 0) ELSE 0 END), 0.00) AS change_given_total "
+                "FROM cash_movements m "
+                "LEFT JOIN sales s ON s.id = m.sale_id "
+                "LEFT JOIN cash_movements orig ON orig.id = m.reverses_id "
+                f"{where_mov} GROUP BY m.method",
                 params_sales,
             )
             m_rows = cur.fetchall()
@@ -1038,14 +1245,39 @@ class MariaDbCashMovementRepository(CashMovementRepository):
             )
             tab_rows = cur.fetchall()
 
+            cur.execute(
+                "SELECT "
+                "COUNT(CASE WHEN kind = 'credit_deposit' AND voided_at IS NOT NULL AND customer_refund_status = 'pending' THEN 1 END) AS pending_credit_refunds_count, "
+                "COALESCE(SUM(CASE WHEN kind = 'credit_deposit' AND voided_at IS NOT NULL AND customer_refund_status = 'pending' THEN customer_refund_amount ELSE 0 END), 0.00) AS pending_credit_refunds_total, "
+                "COALESCE(SUM(CASE WHEN kind = 'credit_deposit' AND voided_at IS NOT NULL AND customer_refund_status = 'completed' THEN customer_refund_amount ELSE 0 END), 0.00) AS completed_credit_refunds_total "
+                f"FROM cash_movements {where_sales}",
+                params_sales,
+            )
+            cm_void_row = cur.fetchone()
+
         rec_principal = {m.value: ZERO for m in PaymentMethod}
         rec_fee = {m.value: ZERO for m in PaymentMethod}
         rec_gross = {m.value: ZERO for m in PaymentMethod}
         net_principal_map = {m.value: ZERO for m in PaymentMethod}
         net_fee_map = {m.value: ZERO for m in PaymentMethod}
         net_gross_map = {m.value: ZERO for m in PaymentMethod}
+        inflow_principal_map = {m.value: ZERO for m in PaymentMethod}
+        inflow_fee_map = {m.value: ZERO for m in PaymentMethod}
+        inflow_gross_map = {m.value: ZERO for m in PaymentMethod}
+        outflow_principal_map = {m.value: ZERO for m in PaymentMethod}
+        outflow_fee_map = {m.value: ZERO for m in PaymentMethod}
+        outflow_gross_map = {m.value: ZERO for m in PaymentMethod}
+        sale_payment_in_gross_map = {m.value: ZERO for m in PaymentMethod}
+        credit_deposit_in_principal_map = {m.value: ZERO for m in PaymentMethod}
+        credit_deposit_in_fee_map = {m.value: ZERO for m in PaymentMethod}
+        credit_deposit_in_gross_map = {m.value: ZERO for m in PaymentMethod}
+        credit_refund_out_gross_map = {m.value: ZERO for m in PaymentMethod}
+        reversal_out_gross_map = {m.value: ZERO for m in PaymentMethod}
+        sale_charged_fee_map = {m.value: ZERO for m in PaymentMethod}
+        credit_charged_fee_map = {m.value: ZERO for m in PaymentMethod}
         charged_fee_map = {m.value: ZERO for m in PaymentMethod}
         reversed_fee_map = {m.value: ZERO for m in PaymentMethod}
+        change_given_map = {m.value: ZERO for m in PaymentMethod}
 
         for r in m_rows:
             meth = r["method"]
@@ -1055,12 +1287,33 @@ class MariaDbCashMovementRepository(CashMovementRepository):
             net_principal_map[meth] = Decimal(str(r["net_principal"]))
             net_fee_map[meth] = Decimal(str(r["net_fee"]))
             net_gross_map[meth] = Decimal(str(r["net_gross"]))
+            inflow_principal_map[meth] = Decimal(str(r["inflow_principal"]))
+            inflow_fee_map[meth] = Decimal(str(r["inflow_fee"]))
+            inflow_gross_map[meth] = Decimal(str(r["inflow_gross"]))
+            outflow_principal_map[meth] = Decimal(str(r["outflow_principal"]))
+            outflow_fee_map[meth] = Decimal(str(r["outflow_fee"]))
+            outflow_gross_map[meth] = Decimal(str(r["outflow_gross"]))
+            sale_payment_in_gross_map[meth] = Decimal(str(r["sale_payment_in_gross"]))
+            credit_deposit_in_principal_map[meth] = Decimal(str(r["credit_deposit_in_principal"]))
+            credit_deposit_in_fee_map[meth] = Decimal(str(r["credit_deposit_in_fee"]))
+            credit_deposit_in_gross_map[meth] = Decimal(str(r["credit_deposit_in_gross"]))
+            credit_refund_out_gross_map[meth] = Decimal(str(r["credit_refund_out_gross"]))
+            reversal_out_gross_map[meth] = Decimal(str(r["reversal_out_gross"]))
+            sale_charged_fee_map[meth] = Decimal(str(r["sale_charged_fee"]))
+            credit_charged_fee_map[meth] = Decimal(str(r["credit_charged_fee"]))
             charged_fee_map[meth] = Decimal(str(r["charged_fee"]))
             reversed_fee_map[meth] = Decimal(str(r["reversed_fee"]))
+            change_given_map[meth] = Decimal(str(r["change_given_total"]))
 
         tabs_open_count = 0
         tabs_closed_count = 0
         tabs_pending_balance_total = ZERO
+        tabs_credit_deposited_total = ZERO
+        tabs_credit_applied_total = ZERO
+        tabs_credit_refunded_total = ZERO
+        tabs_credit_balance_total = ZERO
+        tabs_credit_card_fees_total = ZERO
+
         tab_repo = MariaDbTabRepository(self._conn)
         for tr in tab_rows:
             t = tab_repo.get_by_id(tr["id"])
@@ -1069,19 +1322,29 @@ class MariaDbCashMovementRepository(CashMovementRepository):
             if t.status == TabStatus.OPEN:
                 tabs_open_count += 1
                 tabs_pending_balance_total += t.balance_due
+                tabs_credit_balance_total += t.credit_balance
             else:
                 tabs_closed_count += 1
 
-            # Se a comanda possui excesso de principal pago ainda não devolvido (cancelamento contábil
-            # de consumo com customer_refund_status = 'pending'), deduz do reconhecido por método:
-            if t.net_principal_paid > t.subtotal_consumed:
-                excess_p = t.net_principal_paid - t.subtotal_consumed
+            tabs_credit_deposited_total += t.credit_deposited
+            tabs_credit_applied_total += t.credit_applied
+            tabs_credit_refunded_total += t.credit_refunded
+            tabs_credit_card_fees_total += t.credit_card_fee_paid
+
+            # Se a comanda possui excesso de principal de pagamento ordinário ainda não devolvido
+            # (cancelamento contábil de consumo com customer_refund_status = 'pending'), deduz do reconhecido:
+            if t.net_principal_paid > t.principal_paid:
+                excess_p = t.net_principal_paid - t.principal_paid
                 plan = plan_tab_excess_reversals(t.payments, excess_p)
                 for orig_mov, take_p, take_f, take_g in plan:
                     meth = orig_mov.method.value
                     rec_principal[meth] = max(ZERO, rec_principal[meth] - take_p)
                     rec_fee[meth] = max(ZERO, rec_fee[meth] - take_f)
                     rec_gross[meth] = max(ZERO, rec_gross[meth] - take_g)
+
+        # Soma a taxa de cartão dos depósitos de crédito ativos ao recognized_fee do cartão:
+        rec_fee[PaymentMethod.CARD.value] += tabs_credit_card_fees_total
+        rec_gross[PaymentMethod.CARD.value] += tabs_credit_card_fees_total
 
         by_method = {}
         for m in PaymentMethod:
@@ -1090,36 +1353,85 @@ class MariaDbCashMovementRepository(CashMovementRepository):
                 "recognized_principal": f"{rec_principal[meth]:.2f}",
                 "recognized_fee": f"{rec_fee[meth]:.2f}",
                 "recognized_gross": f"{rec_gross[meth]:.2f}",
+                "in_principal": f"{inflow_principal_map[meth]:.2f}",
+                "in_fee": f"{inflow_fee_map[meth]:.2f}",
+                "in_gross": f"{inflow_gross_map[meth]:.2f}",
+                "out_principal": f"{outflow_principal_map[meth]:.2f}",
+                "out_fee": f"{outflow_fee_map[meth]:.2f}",
+                "out_gross": f"{outflow_gross_map[meth]:.2f}",
+                "inflow_principal": f"{inflow_principal_map[meth]:.2f}",
+                "inflow_fee": f"{inflow_fee_map[meth]:.2f}",
+                "inflow_gross": f"{inflow_gross_map[meth]:.2f}",
+                "outflow_principal": f"{outflow_principal_map[meth]:.2f}",
+                "outflow_fee": f"{outflow_fee_map[meth]:.2f}",
+                "outflow_gross": f"{outflow_gross_map[meth]:.2f}",
+                "sale_payment_in_gross": f"{sale_payment_in_gross_map[meth]:.2f}",
+                "credit_deposit_in_principal": f"{credit_deposit_in_principal_map[meth]:.2f}",
+                "credit_deposit_in_fee": f"{credit_deposit_in_fee_map[meth]:.2f}",
+                "credit_deposit_in_gross": f"{credit_deposit_in_gross_map[meth]:.2f}",
+                "credit_refund_out_gross": f"{credit_refund_out_gross_map[meth]:.2f}",
+                "reversal_out_gross": f"{reversal_out_gross_map[meth]:.2f}",
                 "net_principal": f"{net_principal_map[meth]:.2f}",
                 "net_fee": f"{net_fee_map[meth]:.2f}",
                 "net_gross": f"{net_gross_map[meth]:.2f}",
+                "change_given_total": f"{change_given_map[meth]:.2f}",
             }
 
         active_sales_subtotal = Decimal(str(s_row["active_sales_subtotal"]))
         quick_sales_subtotal = Decimal(str(s_row["quick_sales_subtotal"]))
         tabs_consumed_subtotal = Decimal(str(s_row["tabs_consumed_subtotal"]))
         active_card_fees = sum(rec_fee.values(), ZERO)
+        sale_card_fees_charged_total = sum(sale_charged_fee_map.values(), ZERO)
+        credit_card_fees_charged_total = sum(credit_charged_fee_map.values(), ZERO)
         card_fees_charged_total = sum(charged_fee_map.values(), ZERO)
         card_fees_reversed_total = sum(reversed_fee_map.values(), ZERO)
         active_total_charged = active_sales_subtotal + active_card_fees
         principal_received_total = sum(rec_principal.values(), ZERO)
+        settled_sales_subtotal = principal_received_total + tabs_credit_applied_total
+        inflow_gross_total = sum(inflow_gross_map.values(), ZERO)
+        outflow_gross_total = sum(outflow_gross_map.values(), ZERO)
+        net_gross_total = sum(net_gross_map.values(), ZERO)
+        net_principal_total = sum(net_principal_map.values(), ZERO)
+
+        pending_refunds_count = int(s_row["pending_customer_refunds_count"] or 0) + int(
+            cm_void_row["pending_credit_refunds_count"] or 0
+        )
+        pending_refunds_total = Decimal(str(s_row["pending_customer_refunds_total"])) + Decimal(
+            str(cm_void_row["pending_credit_refunds_total"])
+        )
+        completed_refunds_total = Decimal(str(s_row["completed_customer_refunds_total"])) + Decimal(
+            str(cm_void_row["completed_credit_refunds_total"])
+        )
 
         return {
             "active_sales_count": int(s_row["active_sales_count"] or 0),
             "voided_sales_count": int(s_row["voided_sales_count"] or 0),
-            "pending_customer_refunds_count": int(s_row["pending_customer_refunds_count"] or 0),
+            "pending_customer_refunds_count": pending_refunds_count,
             "active_sales_subtotal": f"{active_sales_subtotal:.2f}",
             "quick_sales_subtotal": f"{quick_sales_subtotal:.2f}",
             "tabs_consumed_subtotal": f"{tabs_consumed_subtotal:.2f}",
             "principal_received_total": f"{principal_received_total:.2f}",
+            "settled_sales_subtotal": f"{settled_sales_subtotal:.2f}",
+            "tabs_credit_deposited_total": f"{tabs_credit_deposited_total:.2f}",
+            "tabs_credit_applied_total": f"{tabs_credit_applied_total:.2f}",
+            "tabs_credit_refunded_total": f"{tabs_credit_refunded_total:.2f}",
+            "tabs_credit_balance_total": f"{tabs_credit_balance_total:.2f}",
             "card_fees_received_total": f"{active_card_fees:.2f}",
             "card_fees_charged_total": f"{card_fees_charged_total:.2f}",
+            "sale_card_fees_charged_total": f"{sale_card_fees_charged_total:.2f}",
+            "credit_card_fees_charged_total": f"{credit_card_fees_charged_total:.2f}",
             "card_fees_reversed_total": f"{card_fees_reversed_total:.2f}",
             "active_card_fees": f"{active_card_fees:.2f}",
             "active_total_charged": f"{active_total_charged:.2f}",
+            "inflow_gross_total": f"{inflow_gross_total:.2f}",
+            "outflow_gross_total": f"{outflow_gross_total:.2f}",
+            "net_principal_total": f"{net_principal_total:.2f}",
+            "net_gross_total": f"{net_gross_total:.2f}",
+            "net_received_total": f"{net_gross_total:.2f}",
+            "tabs_credit_card_fees_total": f"{tabs_credit_card_fees_total:.2f}",
             "voided_total_charged": f"{Decimal(str(s_row['voided_total_charged'])):.2f}",
-            "pending_customer_refunds_total": f"{Decimal(str(s_row['pending_customer_refunds_total'])):.2f}",
-            "completed_customer_refunds_total": f"{Decimal(str(s_row['completed_customer_refunds_total'])):.2f}",
+            "pending_customer_refunds_total": f"{pending_refunds_total:.2f}",
+            "completed_customer_refunds_total": f"{completed_refunds_total:.2f}",
             "tabs_open_count": tabs_open_count,
             "tabs_closed_count": tabs_closed_count,
             "tabs_pending_balance_total": f"{tabs_pending_balance_total:.2f}",

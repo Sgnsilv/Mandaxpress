@@ -56,6 +56,7 @@ def container(config, clock):
         cur.execute("DELETE FROM cash_movements")
         cur.execute("DELETE FROM sale_items")
         cur.execute("DELETE FROM sales")
+        cur.execute("DELETE FROM tabs")
         cur.execute("DELETE FROM shifts")
         cur.execute("DELETE FROM products")
         cur.execute(

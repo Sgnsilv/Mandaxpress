@@ -19,7 +19,10 @@ from ...domain.errors import (
     ProductNotFoundError,
     SaleAlreadyVoidedError,
     SaleNotFoundError,
+    ShiftAlreadyOpenError,
+    ShiftCloseBlockedError,
     ShiftClosedError,
+    ShiftNotFoundError,
     TabAlreadyOpenError,
     TabBalancePendingError,
     TabClosedError,
@@ -60,6 +63,8 @@ _DOMAIN_STATUS = {
     ProductAlreadyExistsError: 409,
     IdempotencyConflictError: 409,
     SaleAlreadyVoidedError: 409,
+    ShiftAlreadyOpenError: 409,
+    ShiftCloseBlockedError: 409,
     ShiftClosedError: 409,
     TabAlreadyOpenError: 409,
     TabClosedError: 409,
@@ -70,6 +75,7 @@ _DOMAIN_STATUS = {
     UserNotFoundError: 404,
     ProductNotFoundError: 404,
     SaleNotFoundError: 404,
+    ShiftNotFoundError: 404,
     TabNotFoundError: 404,
 }
 
@@ -87,7 +93,8 @@ def _error(status: int, code: str, message: str, details=None):
 def register_error_handlers(app: Flask) -> None:
     @app.errorhandler(DomainError)
     def handle_domain(exc: DomainError):
-        response = _error(_DOMAIN_STATUS.get(type(exc), 400), exc.code, exc.message)
+        details = getattr(exc, "details", None)
+        response = _error(_DOMAIN_STATUS.get(type(exc), 400), exc.code, exc.message, details=details)
         if isinstance(exc, NotAuthenticatedError):
             # Cookie inválido/expirado: limpa para o navegador não reenviá-lo.
             from .security import clear_session_cookie

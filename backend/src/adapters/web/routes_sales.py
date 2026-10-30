@@ -178,9 +178,16 @@ def list_sales():
         limit = int(request.args.get("limit", "50"))
     except ValueError:
         limit = 50
+    raw_shift_id = request.args.get("shift_id")
+    shift_id: Optional[int] = None
+    if raw_shift_id is not None and raw_shift_id.strip():
+        try:
+            shift_id = int(raw_shift_id)
+        except ValueError:
+            shift_id = None
     container = current_app.extensions["mx_container"]
-    sales = container.sales.list_recent_sales(limit=limit)
-    summary = container.sales.get_financial_summary()
+    sales = container.sales.list_recent_sales(limit=limit, shift_id=shift_id)
+    summary = container.sales.get_financial_summary(shift_id=shift_id)
     return jsonify({
         "sales": [_serialize_sale(s) for s in sales],
         "summary": summary,
@@ -190,8 +197,15 @@ def list_sales():
 @bp.get("/summary")
 @login_required()
 def get_sales_summary():
+    raw_shift_id = request.args.get("shift_id")
+    shift_id: Optional[int] = None
+    if raw_shift_id is not None and raw_shift_id.strip():
+        try:
+            shift_id = int(raw_shift_id)
+        except ValueError:
+            shift_id = None
     container = current_app.extensions["mx_container"]
-    summary = container.sales.get_financial_summary()
+    summary = container.sales.get_financial_summary(shift_id=shift_id)
     return jsonify({"summary": summary})
 
 

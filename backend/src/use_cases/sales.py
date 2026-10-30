@@ -217,8 +217,10 @@ class QuickSaleService:
 
             now = self._clock.now()
             shift = uow.shifts.get_open_shift(for_update=True)
-            if shift is None:
-                shift = uow.shifts.create_open_shift(opened_by=actor.id, now=now)
+            if shift is None or shift.status != ShiftStatus.OPEN:
+                raise ShiftClosedError(
+                    "Não há turno de caixa aberto. Abra o caixa antes de registrar vendas."
+                )
 
             settings = uow.payment_settings.get(for_update=True)
 
@@ -605,10 +607,10 @@ class QuickSaleService:
                 raise SaleNotFoundError("Venda não encontrada.")
             return sale
 
-    def list_recent_sales(self, limit: int = 50) -> List[Sale]:
+    def list_recent_sales(self, limit: int = 50, shift_id: Optional[int] = None) -> List[Sale]:
         clean_limit = max(1, min(int(limit), 200))
         with self._uow() as uow:
-            return uow.sales.list_recent(limit=clean_limit)
+            return uow.sales.list_recent(limit=clean_limit, shift_id=shift_id)
 
     def get_financial_summary(self, shift_id: Optional[int] = None) -> dict:
         with self._uow() as uow:

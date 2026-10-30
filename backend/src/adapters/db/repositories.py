@@ -73,7 +73,15 @@ def _row_to_product(row: dict) -> Product:
     )
 
 
-def _row_to_shift(row: dict) -> Shift:
+def _dec_or_none(value) -> Optional[Decimal]:
+    return Decimal(str(value)) if value is not None else None
+
+
+def _row_to_shift(
+    row: dict,
+    opened_by_name: Optional[str] = None,
+    closed_by_name: Optional[str] = None,
+) -> Shift:
     return Shift(
         id=row["id"],
         status=ShiftStatus(row["status"]),
@@ -82,8 +90,24 @@ def _row_to_shift(row: dict) -> Shift:
         opening_cash=Decimal(str(row["opening_cash"])),
         closed_by=row.get("closed_by"),
         closed_at=row.get("closed_at"),
-        counted_cash=Decimal(str(row["counted_cash"])) if row.get("counted_cash") is not None else None,
+        counted_cash=_dec_or_none(row.get("counted_cash")),
         notes=row.get("notes"),
+        open_idempotency_key=row.get("open_idempotency_key"),
+        open_request_fingerprint=row.get("open_request_fingerprint"),
+        expected_cash=_dec_or_none(row.get("expected_cash")),
+        cash_difference=_dec_or_none(row.get("cash_difference")),
+        expected_pix=_dec_or_none(row.get("expected_pix")),
+        counted_pix=_dec_or_none(row.get("counted_pix")),
+        pix_difference=_dec_or_none(row.get("pix_difference")),
+        expected_card=_dec_or_none(row.get("expected_card")),
+        counted_card=_dec_or_none(row.get("counted_card")),
+        card_difference=_dec_or_none(row.get("card_difference")),
+        discrepancy_justification=row.get("discrepancy_justification"),
+        close_idempotency_key=row.get("close_idempotency_key"),
+        close_request_fingerprint=row.get("close_request_fingerprint"),
+        closing_snapshot=row.get("closing_snapshot"),
+        opened_by_name=opened_by_name or row.get("opened_by_name"),
+        closed_by_name=closed_by_name or row.get("closed_by_name"),
     )
 
 
@@ -404,50 +428,151 @@ class MariaDbShiftRepository(ShiftRepository):
     def __init__(self, conn):
         self._conn = conn
 
+    def _hydrate_shift(self, row: Optional[dict]) -> Optional[Shift]:
+        if not row:
+            return None
+        user_ids = {row["opened_by"]}
+        if row.get("closed_by") is not None:
+            user_ids.add(row["closed_by"])
+        placeholders = ", ".join(["%s"] * len(user_ids))
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, name FROM users WHERE id IN ({placeholders})",
+                tuple(user_ids),
+            )
+            names_map = {r["id"]: r["name"] for r in cur.fetchall()}
+        return _row_to_shift(
+            row,
+            opened_by_name=names_map.get(row["opened_by"]),
+            closed_by_name=names_map.get(row.get("closed_by")),
+        )
+
     def get_open_shift(self, for_update: bool = False) -> Optional[Shift]:
         lock_sql = " FOR UPDATE" if for_update else ""
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT id, status, opened_by, opened_at, opening_cash, "
-                "closed_by, closed_at, counted_cash, notes "
-                f"FROM shifts WHERE status = 'open' ORDER BY id DESC LIMIT 1{lock_sql}"
+                f"SELECT * FROM shifts WHERE status = 'open' ORDER BY id DESC LIMIT 1{lock_sql}"
             )
             row = cur.fetchone()
-        return _row_to_shift(row) if row else None
+        return self._hydrate_shift(row)
 
     def get_by_id(self, shift_id: int, for_update: bool = False) -> Optional[Shift]:
         lock_sql = " FOR UPDATE" if for_update else ""
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT id, status, opened_by, opened_at, opening_cash, "
-                "closed_by, closed_at, counted_cash, notes "
-                f"FROM shifts WHERE id = %s{lock_sql}",
+                f"SELECT * FROM shifts WHERE id = %s{lock_sql}",
                 (shift_id,),
             )
             row = cur.fetchone()
-        return _row_to_shift(row) if row else None
+        return self._hydrate_shift(row)
 
-    def create_open_shift(self, opened_by: int, now: datetime,
-                          opening_cash: Decimal = Decimal("0.00")) -> Shift:
+    def get_by_open_idempotency_key(self, idempotency_key: str, for_update: bool = False) -> Optional[Shift]:
+        lock_sql = " FOR UPDATE" if for_update else ""
         with self._conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO shifts (status, opened_by, opened_at, opening_cash) "
-                "VALUES ('open', %s, %s, %s)",
-                (opened_by, now, str(opening_cash)),
+                f"SELECT * FROM shifts WHERE open_idempotency_key = %s{lock_sql}",
+                (idempotency_key,),
+            )
+            row = cur.fetchone()
+        return self._hydrate_shift(row)
+
+    def get_by_close_idempotency_key(self, idempotency_key: str, for_update: bool = False) -> Optional[Shift]:
+        lock_sql = " FOR UPDATE" if for_update else ""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT * FROM shifts WHERE close_idempotency_key = %s{lock_sql}",
+                (idempotency_key,),
+            )
+            row = cur.fetchone()
+        return self._hydrate_shift(row)
+
+    def list_shifts(self, status: Optional[ShiftStatus] = None, limit: int = 50) -> List[Shift]:
+        where = "WHERE status = %s" if status is not None else ""
+        params = (status.value, limit) if status is not None else (limit,)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT * FROM shifts {where} ORDER BY id DESC LIMIT %s",
+                params,
+            )
+            rows = cur.fetchall()
+        return [self._hydrate_shift(r) for r in rows if r is not None]  # type: ignore[misc]
+
+    def create_open_shift(
+        self,
+        opened_by: int,
+        now: datetime,
+        opening_cash: Decimal = Decimal("0.00"),
+        notes: Optional[str] = None,
+        open_idempotency_key: Optional[str] = None,
+        open_request_fingerprint: Optional[str] = None,
+    ) -> Shift:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO shifts (status, opened_by, opened_at, opening_cash, "
+                "open_idempotency_key, open_request_fingerprint, notes) "
+                "VALUES ('open', %s, %s, %s, %s, %s, %s)",
+                (
+                    opened_by,
+                    now,
+                    str(opening_cash),
+                    open_idempotency_key,
+                    open_request_fingerprint,
+                    notes,
+                ),
             )
             shift_id = cur.lastrowid
         shift = self.get_by_id(shift_id)
         assert shift is not None
         return shift
 
-    def close_shift(self, shift_id: int, closed_by: int, now: datetime,
-                    counted_cash: Optional[Decimal] = None,
-                    notes: Optional[str] = None) -> Shift:
+    def close_shift(
+        self,
+        shift_id: int,
+        closed_by: int,
+        now: datetime,
+        counted_cash: Optional[Decimal] = None,
+        notes: Optional[str] = None,
+        expected_cash: Optional[Decimal] = None,
+        cash_difference: Optional[Decimal] = None,
+        expected_pix: Optional[Decimal] = None,
+        counted_pix: Optional[Decimal] = None,
+        pix_difference: Optional[Decimal] = None,
+        expected_card: Optional[Decimal] = None,
+        counted_card: Optional[Decimal] = None,
+        card_difference: Optional[Decimal] = None,
+        discrepancy_justification: Optional[str] = None,
+        closing_snapshot: Optional[str] = None,
+        close_idempotency_key: Optional[str] = None,
+        close_request_fingerprint: Optional[str] = None,
+    ) -> Shift:
         with self._conn.cursor() as cur:
             cur.execute(
                 "UPDATE shifts SET status = 'closed', closed_by = %s, closed_at = %s, "
-                "counted_cash = %s, notes = %s WHERE id = %s",
-                (closed_by, now, str(counted_cash) if counted_cash is not None else None, notes, shift_id),
+                "expected_cash = %s, counted_cash = %s, cash_difference = %s, "
+                "expected_pix = %s, counted_pix = %s, pix_difference = %s, "
+                "expected_card = %s, counted_card = %s, card_difference = %s, "
+                "notes = COALESCE(%s, notes), discrepancy_justification = %s, "
+                "close_idempotency_key = %s, close_request_fingerprint = %s, "
+                "closing_snapshot = %s WHERE id = %s",
+                (
+                    closed_by,
+                    now,
+                    str(expected_cash) if expected_cash is not None else None,
+                    str(counted_cash) if counted_cash is not None else None,
+                    str(cash_difference) if cash_difference is not None else None,
+                    str(expected_pix) if expected_pix is not None else None,
+                    str(counted_pix) if counted_pix is not None else None,
+                    str(pix_difference) if pix_difference is not None else None,
+                    str(expected_card) if expected_card is not None else None,
+                    str(counted_card) if counted_card is not None else None,
+                    str(card_difference) if card_difference is not None else None,
+                    notes,
+                    discrepancy_justification,
+                    close_idempotency_key,
+                    close_request_fingerprint,
+                    closing_snapshot,
+                    shift_id,
+                ),
             )
         shift = self.get_by_id(shift_id)
         assert shift is not None
@@ -939,9 +1064,13 @@ class MariaDbTabRepository(TabRepository):
         number: Optional[int] = None,
         search: Optional[str] = None,
         limit: int = 100,
+        shift_id: Optional[int] = None,
     ) -> List[Tab]:
         clauses = []
         params = []
+        if shift_id is not None:
+            clauses.append("shift_id = %s")
+            params.append(shift_id)
         if status is not None:
             clauses.append("status = %s")
             params.append(status.value)
@@ -1157,10 +1286,118 @@ class MariaDbCashMovementRepository(CashMovementRepository):
                 (refunded_by, refunded_at, method.value, notes, movement_id),
             )
 
-    def get_financial_summary(self, shift_id: Optional[int] = None) -> dict:
-        where_sales = "WHERE shift_id = %s" if shift_id is not None else ""
-        params_sales = (shift_id,) if shift_id is not None else ()
+    def list_drawer_movements(self, shift_id: int, for_update: bool = False) -> List[dict]:
+        lock_sql = " FOR UPDATE" if for_update else ""
         with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT m.id, m.shift_id, m.kind, m.method, m.direction, m.amount, m.gross_amount, "
+                "m.operator_id, u.name AS operator_name, m.created_at, m.idempotency_key, m.note "
+                "FROM cash_movements m "
+                "LEFT JOIN users u ON u.id = m.operator_id "
+                "WHERE m.shift_id = %s AND m.kind IN ('cash_supply', 'cash_withdrawal') "
+                f"ORDER BY m.id ASC{lock_sql}",
+                (shift_id,),
+            )
+            rows = cur.fetchall()
+        result = []
+        for r in rows:
+            result.append({
+                "id": r["id"],
+                "shift_id": r["shift_id"],
+                "kind": r["kind"],
+                "method": r["method"],
+                "direction": r["direction"],
+                "amount": f"{Decimal(str(r['amount'])):.2f}",
+                "gross_amount": f"{Decimal(str(r['gross_amount'])):.2f}",
+                "operator_id": r["operator_id"],
+                "operator_name": r.get("operator_name"),
+                "created_at": r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else str(r["created_at"]),
+                "idempotency_key": r["idempotency_key"],
+                "reason": r.get("note") or "",
+                "note": r.get("note") or "",
+            })
+        return result
+
+    def list_pending_refunds(self, shift_id: int, for_update: bool = False) -> List[dict]:
+        lock_sql = " FOR UPDATE" if for_update else ""
+        pending: List[dict] = []
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT s.id AS sale_id, s.shift_id, s.tab_id, t.number AS tab_number, "
+                "t.customer_name, s.kind, s.customer_refund_amount, s.void_reason, s.voided_at "
+                "FROM sales s "
+                "LEFT JOIN tabs t ON t.id = s.tab_id "
+                "WHERE s.shift_id = %s AND s.status = 'voided' AND s.customer_refund_status = 'pending' "
+                f"ORDER BY s.id ASC{lock_sql}",
+                (shift_id,),
+            )
+            for r in cur.fetchall():
+                pending.append({
+                    "obligation_kind": "quick_sale_refund" if r["kind"] == "quick" else "tab_item_refund",
+                    "sale_id": r["sale_id"],
+                    "movement_id": None,
+                    "tab_id": r.get("tab_id"),
+                    "tab_number": r.get("tab_number"),
+                    "customer_name": r.get("customer_name"),
+                    "amount": f"{Decimal(str(r['customer_refund_amount'])):.2f}",
+                    "refund_amount": f"{Decimal(str(r['customer_refund_amount'])):.2f}",
+                    "void_reason": r.get("void_reason"),
+                    "voided_at": r["voided_at"].isoformat() if r.get("voided_at") else None,
+                })
+
+            cur.execute(
+                "SELECT m.id AS movement_id, m.shift_id, m.tab_id, t.number AS tab_number, "
+                "t.customer_name, m.customer_refund_amount, m.void_reason, m.voided_at "
+                "FROM cash_movements m "
+                "LEFT JOIN tabs t ON t.id = m.tab_id "
+                "WHERE m.shift_id = %s AND m.kind = 'credit_deposit' "
+                "AND m.voided_at IS NOT NULL AND m.customer_refund_status = 'pending' "
+                f"ORDER BY m.id ASC{lock_sql}",
+                (shift_id,),
+            )
+            for r in cur.fetchall():
+                pending.append({
+                    "obligation_kind": "credit_deposit_refund",
+                    "sale_id": None,
+                    "movement_id": r["movement_id"],
+                    "tab_id": r.get("tab_id"),
+                    "tab_number": r.get("tab_number"),
+                    "customer_name": r.get("customer_name"),
+                    "amount": f"{Decimal(str(r['customer_refund_amount'])):.2f}",
+                    "refund_amount": f"{Decimal(str(r['customer_refund_amount'])):.2f}",
+                    "void_reason": r.get("void_reason"),
+                    "voided_at": r["voided_at"].isoformat() if r.get("voided_at") else None,
+                })
+        return pending
+
+    def get_financial_summary(self, shift_id: Optional[int] = None) -> dict:
+        resolved_shift_id = shift_id
+        opening_cash = ZERO
+        with self._conn.cursor() as cur:
+            if resolved_shift_id is not None:
+                cur.execute(
+                    "SELECT id, opening_cash FROM shifts WHERE id = %s",
+                    (resolved_shift_id,),
+                )
+                sh_row = cur.fetchone()
+                if sh_row:
+                    opening_cash = Decimal(str(sh_row["opening_cash"]))
+            else:
+                cur.execute(
+                    "SELECT id, opening_cash FROM shifts WHERE status = 'open' ORDER BY id DESC LIMIT 1"
+                )
+                sh_row = cur.fetchone()
+                if not sh_row:
+                    cur.execute(
+                        "SELECT id, opening_cash FROM shifts ORDER BY id DESC LIMIT 1"
+                    )
+                    sh_row = cur.fetchone()
+                if sh_row:
+                    resolved_shift_id = sh_row["id"]
+                    opening_cash = Decimal(str(sh_row["opening_cash"]))
+
+            where_sales = "WHERE shift_id = %s" if resolved_shift_id is not None else ""
+            params_sales = (resolved_shift_id,) if resolved_shift_id is not None else ()
             cur.execute(
                 "SELECT "
                 "COUNT(CASE WHEN status = 'active' THEN 1 END) AS active_sales_count, "
@@ -1177,7 +1414,7 @@ class MariaDbCashMovementRepository(CashMovementRepository):
             )
             s_row = cur.fetchone()
 
-            where_mov = "WHERE m.shift_id = %s" if shift_id is not None else ""
+            where_mov = "WHERE m.shift_id = %s" if resolved_shift_id is not None else ""
             cur.execute(
                 "SELECT m.method, "
                 "COALESCE(SUM(CASE "
@@ -1202,34 +1439,45 @@ class MariaDbCashMovementRepository(CashMovementRepository):
                 "  ELSE 0 "
                 "END), 0.00) AS recognized_gross, "
                 "COALESCE(SUM(CASE "
-                "  WHEN m.direction = 'in' THEN m.amount "
-                "  ELSE -m.amount "
+                "  WHEN m.kind IN ('sale_payment', 'credit_deposit', 'credit_refund', 'reversal') AND m.direction = 'in' THEN m.amount "
+                "  WHEN m.kind IN ('sale_payment', 'credit_deposit', 'credit_refund', 'reversal') AND m.direction = 'out' THEN -m.amount "
+                "  ELSE 0 "
                 "END), 0.00) AS net_principal, "
                 "COALESCE(SUM(CASE "
-                "  WHEN m.direction = 'in' THEN m.fee_amount "
-                "  ELSE -m.fee_amount "
+                "  WHEN m.kind IN ('sale_payment', 'credit_deposit', 'credit_refund', 'reversal') AND m.direction = 'in' THEN m.fee_amount "
+                "  WHEN m.kind IN ('sale_payment', 'credit_deposit', 'credit_refund', 'reversal') AND m.direction = 'out' THEN -m.fee_amount "
+                "  ELSE 0 "
                 "END), 0.00) AS net_fee, "
                 "COALESCE(SUM(CASE "
-                "  WHEN m.direction = 'in' THEN m.gross_amount "
-                "  ELSE -m.gross_amount "
+                "  WHEN m.kind IN ('sale_payment', 'credit_deposit', 'credit_refund', 'reversal') AND m.direction = 'in' THEN m.gross_amount "
+                "  WHEN m.kind IN ('sale_payment', 'credit_deposit', 'credit_refund', 'reversal') AND m.direction = 'out' THEN -m.gross_amount "
+                "  ELSE 0 "
                 "END), 0.00) AS net_gross, "
-                "COALESCE(SUM(CASE WHEN m.direction = 'in' THEN m.amount ELSE 0 END), 0.00) AS inflow_principal, "
-                "COALESCE(SUM(CASE WHEN m.direction = 'in' THEN m.fee_amount ELSE 0 END), 0.00) AS inflow_fee, "
-                "COALESCE(SUM(CASE WHEN m.direction = 'in' THEN m.gross_amount ELSE 0 END), 0.00) AS inflow_gross, "
-                "COALESCE(SUM(CASE WHEN m.direction = 'out' THEN m.amount ELSE 0 END), 0.00) AS outflow_principal, "
-                "COALESCE(SUM(CASE WHEN m.direction = 'out' THEN m.fee_amount ELSE 0 END), 0.00) AS outflow_fee, "
-                "COALESCE(SUM(CASE WHEN m.direction = 'out' THEN m.gross_amount ELSE 0 END), 0.00) AS outflow_gross, "
+                "COALESCE(SUM(CASE WHEN m.kind IN ('sale_payment', 'credit_deposit') AND m.direction = 'in' THEN m.amount ELSE 0 END), 0.00) AS inflow_principal, "
+                "COALESCE(SUM(CASE WHEN m.kind IN ('sale_payment', 'credit_deposit') AND m.direction = 'in' THEN m.fee_amount ELSE 0 END), 0.00) AS inflow_fee, "
+                "COALESCE(SUM(CASE WHEN m.kind IN ('sale_payment', 'credit_deposit') AND m.direction = 'in' THEN m.gross_amount ELSE 0 END), 0.00) AS inflow_gross, "
+                "COALESCE(SUM(CASE WHEN m.kind IN ('credit_refund', 'reversal') AND m.direction = 'out' THEN m.amount ELSE 0 END), 0.00) AS outflow_principal, "
+                "COALESCE(SUM(CASE WHEN m.kind IN ('credit_refund', 'reversal') AND m.direction = 'out' THEN m.fee_amount ELSE 0 END), 0.00) AS outflow_fee, "
+                "COALESCE(SUM(CASE WHEN m.kind IN ('credit_refund', 'reversal') AND m.direction = 'out' THEN m.gross_amount ELSE 0 END), 0.00) AS outflow_gross, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'sale_payment' THEN m.amount ELSE 0 END), 0.00) AS sale_payment_in_principal, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'sale_payment' THEN m.fee_amount ELSE 0 END), 0.00) AS sale_payment_in_fee, "
                 "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'sale_payment' THEN m.gross_amount ELSE 0 END), 0.00) AS sale_payment_in_gross, "
                 "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'credit_deposit' THEN m.amount ELSE 0 END), 0.00) AS credit_deposit_in_principal, "
                 "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'credit_deposit' THEN m.fee_amount ELSE 0 END), 0.00) AS credit_deposit_in_fee, "
                 "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'credit_deposit' THEN m.gross_amount ELSE 0 END), 0.00) AS credit_deposit_in_gross, "
                 "COALESCE(SUM(CASE WHEN m.direction = 'out' AND m.kind = 'credit_refund' THEN m.gross_amount ELSE 0 END), 0.00) AS credit_refund_out_gross, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'out' AND m.kind = 'reversal' THEN m.amount ELSE 0 END), 0.00) AS reversal_out_principal, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'out' AND m.kind = 'reversal' THEN m.fee_amount ELSE 0 END), 0.00) AS reversal_out_fee, "
                 "COALESCE(SUM(CASE WHEN m.direction = 'out' AND m.kind = 'reversal' THEN m.gross_amount ELSE 0 END), 0.00) AS reversal_out_gross, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'cash_supply' THEN m.gross_amount ELSE 0 END), 0.00) AS cash_supply_in_gross, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'out' AND m.kind = 'cash_withdrawal' THEN m.gross_amount ELSE 0 END), 0.00) AS cash_withdrawal_out_gross, "
+                "COUNT(CASE WHEN m.direction = 'in' AND m.kind = 'cash_supply' THEN 1 END) AS cash_supplies_count, "
+                "COUNT(CASE WHEN m.direction = 'out' AND m.kind = 'cash_withdrawal' THEN 1 END) AS cash_withdrawals_count, "
                 "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'sale_payment' THEN m.fee_amount ELSE 0 END), 0.00) AS sale_charged_fee, "
                 "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind = 'credit_deposit' THEN m.fee_amount ELSE 0 END), 0.00) AS credit_charged_fee, "
-                "COALESCE(SUM(CASE WHEN m.direction = 'in' THEN m.fee_amount ELSE 0 END), 0.00) AS charged_fee, "
-                "COALESCE(SUM(CASE WHEN m.direction = 'out' THEN m.fee_amount ELSE 0 END), 0.00) AS reversed_fee, "
-                "COALESCE(SUM(CASE WHEN m.direction = 'in' THEN COALESCE(m.change_given, 0) ELSE 0 END), 0.00) AS change_given_total "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind IN ('sale_payment', 'credit_deposit') THEN m.fee_amount ELSE 0 END), 0.00) AS charged_fee, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'out' AND m.kind IN ('credit_refund', 'reversal') THEN m.fee_amount ELSE 0 END), 0.00) AS reversed_fee, "
+                "COALESCE(SUM(CASE WHEN m.direction = 'in' AND m.kind IN ('sale_payment', 'credit_deposit') THEN COALESCE(m.change_given, 0) ELSE 0 END), 0.00) AS change_given_total "
                 "FROM cash_movements m "
                 "LEFT JOIN sales s ON s.id = m.sale_id "
                 "LEFT JOIN cash_movements orig ON orig.id = m.reverses_id "
@@ -1238,7 +1486,7 @@ class MariaDbCashMovementRepository(CashMovementRepository):
             )
             m_rows = cur.fetchall()
 
-            where_tabs = "WHERE shift_id = %s" if shift_id is not None else ""
+            where_tabs = "WHERE shift_id = %s" if resolved_shift_id is not None else ""
             cur.execute(
                 f"SELECT id, status FROM tabs {where_tabs}",
                 params_sales,
@@ -1267,17 +1515,25 @@ class MariaDbCashMovementRepository(CashMovementRepository):
         outflow_principal_map = {m.value: ZERO for m in PaymentMethod}
         outflow_fee_map = {m.value: ZERO for m in PaymentMethod}
         outflow_gross_map = {m.value: ZERO for m in PaymentMethod}
+        sale_payment_in_principal_map = {m.value: ZERO for m in PaymentMethod}
+        sale_payment_in_fee_map = {m.value: ZERO for m in PaymentMethod}
         sale_payment_in_gross_map = {m.value: ZERO for m in PaymentMethod}
         credit_deposit_in_principal_map = {m.value: ZERO for m in PaymentMethod}
         credit_deposit_in_fee_map = {m.value: ZERO for m in PaymentMethod}
         credit_deposit_in_gross_map = {m.value: ZERO for m in PaymentMethod}
         credit_refund_out_gross_map = {m.value: ZERO for m in PaymentMethod}
+        reversal_out_principal_map = {m.value: ZERO for m in PaymentMethod}
+        reversal_out_fee_map = {m.value: ZERO for m in PaymentMethod}
         reversal_out_gross_map = {m.value: ZERO for m in PaymentMethod}
+        cash_supply_in_gross_map = {m.value: ZERO for m in PaymentMethod}
+        cash_withdrawal_out_gross_map = {m.value: ZERO for m in PaymentMethod}
         sale_charged_fee_map = {m.value: ZERO for m in PaymentMethod}
         credit_charged_fee_map = {m.value: ZERO for m in PaymentMethod}
         charged_fee_map = {m.value: ZERO for m in PaymentMethod}
         reversed_fee_map = {m.value: ZERO for m in PaymentMethod}
         change_given_map = {m.value: ZERO for m in PaymentMethod}
+        cash_supplies_count = 0
+        cash_withdrawals_count = 0
 
         for r in m_rows:
             meth = r["method"]
@@ -1293,12 +1549,20 @@ class MariaDbCashMovementRepository(CashMovementRepository):
             outflow_principal_map[meth] = Decimal(str(r["outflow_principal"]))
             outflow_fee_map[meth] = Decimal(str(r["outflow_fee"]))
             outflow_gross_map[meth] = Decimal(str(r["outflow_gross"]))
+            sale_payment_in_principal_map[meth] = Decimal(str(r["sale_payment_in_principal"]))
+            sale_payment_in_fee_map[meth] = Decimal(str(r["sale_payment_in_fee"]))
             sale_payment_in_gross_map[meth] = Decimal(str(r["sale_payment_in_gross"]))
             credit_deposit_in_principal_map[meth] = Decimal(str(r["credit_deposit_in_principal"]))
             credit_deposit_in_fee_map[meth] = Decimal(str(r["credit_deposit_in_fee"]))
             credit_deposit_in_gross_map[meth] = Decimal(str(r["credit_deposit_in_gross"]))
             credit_refund_out_gross_map[meth] = Decimal(str(r["credit_refund_out_gross"]))
+            reversal_out_principal_map[meth] = Decimal(str(r["reversal_out_principal"]))
+            reversal_out_fee_map[meth] = Decimal(str(r["reversal_out_fee"]))
             reversal_out_gross_map[meth] = Decimal(str(r["reversal_out_gross"]))
+            cash_supply_in_gross_map[meth] = Decimal(str(r["cash_supply_in_gross"]))
+            cash_withdrawal_out_gross_map[meth] = Decimal(str(r["cash_withdrawal_out_gross"]))
+            cash_supplies_count += int(r["cash_supplies_count"] or 0)
+            cash_withdrawals_count += int(r["cash_withdrawals_count"] or 0)
             sale_charged_fee_map[meth] = Decimal(str(r["sale_charged_fee"]))
             credit_charged_fee_map[meth] = Decimal(str(r["credit_charged_fee"]))
             charged_fee_map[meth] = Decimal(str(r["charged_fee"]))
@@ -1313,6 +1577,7 @@ class MariaDbCashMovementRepository(CashMovementRepository):
         tabs_credit_refunded_total = ZERO
         tabs_credit_balance_total = ZERO
         tabs_credit_card_fees_total = ZERO
+        incomplete_operations_count = 0
 
         tab_repo = MariaDbTabRepository(self._conn)
         for tr in tab_rows:
@@ -1323,6 +1588,8 @@ class MariaDbCashMovementRepository(CashMovementRepository):
                 tabs_open_count += 1
                 tabs_pending_balance_total += t.balance_due
                 tabs_credit_balance_total += t.credit_balance
+                if t.net_principal_paid > t.subtotal_consumed and t.pending_refund_total == ZERO:
+                    incomplete_operations_count += 1
             else:
                 tabs_closed_count += 1
 
@@ -1346,9 +1613,26 @@ class MariaDbCashMovementRepository(CashMovementRepository):
         rec_fee[PaymentMethod.CARD.value] += tabs_credit_card_fees_total
         rec_gross[PaymentMethod.CARD.value] += tabs_credit_card_fees_total
 
+        cash_supplies_total = sum(cash_supply_in_gross_map.values(), ZERO)
+        cash_withdrawals_total = sum(cash_withdrawal_out_gross_map.values(), ZERO)
+        expected_cash = (
+            opening_cash
+            + inflow_gross_map[PaymentMethod.CASH.value]
+            - outflow_gross_map[PaymentMethod.CASH.value]
+            + cash_supplies_total
+            - cash_withdrawals_total
+        )
+        expected_pix = net_gross_map[PaymentMethod.PIX.value]
+        expected_card = net_gross_map[PaymentMethod.CARD.value]
+
         by_method = {}
         for m in PaymentMethod:
             meth = m.value
+            expected_for_method = (
+                expected_cash
+                if m == PaymentMethod.CASH
+                else (expected_pix if m == PaymentMethod.PIX else expected_card)
+            )
             by_method[meth] = {
                 "recognized_principal": f"{rec_principal[meth]:.2f}",
                 "recognized_fee": f"{rec_fee[meth]:.2f}",
@@ -1359,21 +1643,34 @@ class MariaDbCashMovementRepository(CashMovementRepository):
                 "out_principal": f"{outflow_principal_map[meth]:.2f}",
                 "out_fee": f"{outflow_fee_map[meth]:.2f}",
                 "out_gross": f"{outflow_gross_map[meth]:.2f}",
+                "principal_in": f"{inflow_principal_map[meth]:.2f}",
+                "fee_in": f"{inflow_fee_map[meth]:.2f}",
+                "gross_in": f"{inflow_gross_map[meth]:.2f}",
+                "principal_out": f"{outflow_principal_map[meth]:.2f}",
+                "fee_out": f"{outflow_fee_map[meth]:.2f}",
+                "gross_out": f"{outflow_gross_map[meth]:.2f}",
                 "inflow_principal": f"{inflow_principal_map[meth]:.2f}",
                 "inflow_fee": f"{inflow_fee_map[meth]:.2f}",
                 "inflow_gross": f"{inflow_gross_map[meth]:.2f}",
                 "outflow_principal": f"{outflow_principal_map[meth]:.2f}",
                 "outflow_fee": f"{outflow_fee_map[meth]:.2f}",
                 "outflow_gross": f"{outflow_gross_map[meth]:.2f}",
+                "sale_payment_in_principal": f"{sale_payment_in_principal_map[meth]:.2f}",
+                "sale_payment_in_fee": f"{sale_payment_in_fee_map[meth]:.2f}",
                 "sale_payment_in_gross": f"{sale_payment_in_gross_map[meth]:.2f}",
                 "credit_deposit_in_principal": f"{credit_deposit_in_principal_map[meth]:.2f}",
                 "credit_deposit_in_fee": f"{credit_deposit_in_fee_map[meth]:.2f}",
                 "credit_deposit_in_gross": f"{credit_deposit_in_gross_map[meth]:.2f}",
                 "credit_refund_out_gross": f"{credit_refund_out_gross_map[meth]:.2f}",
+                "reversal_out_principal": f"{reversal_out_principal_map[meth]:.2f}",
+                "reversal_out_fee": f"{reversal_out_fee_map[meth]:.2f}",
                 "reversal_out_gross": f"{reversal_out_gross_map[meth]:.2f}",
+                "cash_supply_in_gross": f"{cash_supply_in_gross_map[meth]:.2f}",
+                "cash_withdrawal_out_gross": f"{cash_withdrawal_out_gross_map[meth]:.2f}",
                 "net_principal": f"{net_principal_map[meth]:.2f}",
                 "net_fee": f"{net_fee_map[meth]:.2f}",
                 "net_gross": f"{net_gross_map[meth]:.2f}",
+                "expected_amount": f"{expected_for_method:.2f}",
                 "change_given_total": f"{change_given_map[meth]:.2f}",
             }
 
@@ -1404,16 +1701,31 @@ class MariaDbCashMovementRepository(CashMovementRepository):
         )
 
         return {
+            "shift_id": resolved_shift_id,
+            "opening_cash": f"{opening_cash:.2f}",
+            "expected_cash": f"{expected_cash:.2f}",
+            "expected_pix": f"{expected_pix:.2f}",
+            "expected_card": f"{expected_card:.2f}",
+            "cash_supplies_count": cash_supplies_count,
+            "cash_supplies_total": f"{cash_supplies_total:.2f}",
+            "cash_withdrawals_count": cash_withdrawals_count,
+            "cash_withdrawals_total": f"{cash_withdrawals_total:.2f}",
+            "sales_count": int(s_row["active_sales_count"] or 0),
             "active_sales_count": int(s_row["active_sales_count"] or 0),
             "voided_sales_count": int(s_row["voided_sales_count"] or 0),
             "pending_customer_refunds_count": pending_refunds_count,
+            "incomplete_operations_count": incomplete_operations_count,
+            "total_products_sold": f"{active_sales_subtotal:.2f}",
             "active_sales_subtotal": f"{active_sales_subtotal:.2f}",
             "quick_sales_subtotal": f"{quick_sales_subtotal:.2f}",
             "tabs_consumed_subtotal": f"{tabs_consumed_subtotal:.2f}",
+            "tabs_active_consumed": f"{tabs_consumed_subtotal:.2f}",
             "principal_received_total": f"{principal_received_total:.2f}",
             "settled_sales_subtotal": f"{settled_sales_subtotal:.2f}",
+            "credit_deposits_total": f"{tabs_credit_deposited_total:.2f}",
             "tabs_credit_deposited_total": f"{tabs_credit_deposited_total:.2f}",
             "tabs_credit_applied_total": f"{tabs_credit_applied_total:.2f}",
+            "credit_refunds_total": f"{tabs_credit_refunded_total:.2f}",
             "tabs_credit_refunded_total": f"{tabs_credit_refunded_total:.2f}",
             "tabs_credit_balance_total": f"{tabs_credit_balance_total:.2f}",
             "card_fees_received_total": f"{active_card_fees:.2f}",
@@ -1425,7 +1737,9 @@ class MariaDbCashMovementRepository(CashMovementRepository):
             "active_total_charged": f"{active_total_charged:.2f}",
             "inflow_gross_total": f"{inflow_gross_total:.2f}",
             "outflow_gross_total": f"{outflow_gross_total:.2f}",
+            "net_principal": f"{net_principal_total:.2f}",
             "net_principal_total": f"{net_principal_total:.2f}",
+            "net_gross": f"{net_gross_total:.2f}",
             "net_gross_total": f"{net_gross_total:.2f}",
             "net_received_total": f"{net_gross_total:.2f}",
             "tabs_credit_card_fees_total": f"{tabs_credit_card_fees_total:.2f}",

@@ -7,7 +7,15 @@ from typing import Optional
 from flask import Flask, g
 
 from ...config import Config
-from . import routes_auth, routes_products, routes_sales, routes_settings, routes_system, routes_tabs
+from . import (
+    routes_auth,
+    routes_products,
+    routes_sales,
+    routes_settings,
+    routes_shifts,
+    routes_system,
+    routes_tabs,
+)
 from .container import Container, build_container
 from .errors import register_error_handlers
 from .security import check_origin
@@ -44,5 +52,6 @@ def create_app(config: Optional[Config] = None, container: Optional[Container] =
     app.register_blueprint(routes_settings.bp)
     app.register_blueprint(routes_sales.bp)
     app.register_blueprint(routes_tabs.bp)
+    app.register_blueprint(routes_shifts.bp)
     register_error_handlers(app)
     return app

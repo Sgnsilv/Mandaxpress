@@ -225,16 +225,18 @@ class TabService:
         for attempt in range(1, max_attempts + 1):
             try:
                 with self._uow() as uow:
+                    now = self._clock.now()
+                    shift = uow.shifts.get_open_shift(for_update=True)
+                    if shift is None or shift.status != ShiftStatus.OPEN:
+                        raise ShiftClosedError(
+                            "Não há turno de caixa aberto. Abra o caixa antes de abrir comandas."
+                        )
+
                     existing_open = uow.tabs.get_open_by_number(clean_number, for_update=True)
                     if existing_open is not None:
                         raise TabAlreadyOpenError(
                             f"Já existe uma comanda aberta com o número {clean_number}."
                         )
-
-                    now = self._clock.now()
-                    shift = uow.shifts.get_open_shift(for_update=True)
-                    if shift is None:
-                        shift = uow.shifts.create_open_shift(opened_by=actor.id, now=now)
 
                     tab_id = uow.tabs.create_tab(
                         shift_id=shift.id,
@@ -291,6 +293,7 @@ class TabService:
         number: Optional[Union[int, str]] = None,
         search: Optional[str] = None,
         limit: int = 100,
+        shift_id: Optional[int] = None,
     ) -> List[Tab]:
         status_enum: Optional[TabStatus] = None
         if status is not None and str(status).strip() and str(status).strip().lower() != "all":
@@ -313,6 +316,7 @@ class TabService:
                 number=clean_number,
                 search=clean_search,
                 limit=clean_limit,
+                shift_id=shift_id,
             )
 
     def add_items(
@@ -392,11 +396,13 @@ class TabService:
 
             now = self._clock.now()
             tab_shift = uow.shifts.get_by_id(tab.shift_id, for_update=True)
-            if tab_shift is not None and tab_shift.status != ShiftStatus.OPEN:
+            if tab_shift is None or tab_shift.status != ShiftStatus.OPEN:
                 raise ShiftClosedError("Não é permitido lançar consumo em um turno já fechado.")
             shift = uow.shifts.get_open_shift(for_update=True)
-            if shift is None:
-                shift = uow.shifts.create_open_shift(opened_by=actor.id, now=now)
+            if shift is None or shift.status != ShiftStatus.OPEN:
+                raise ShiftClosedError(
+                    "Não há turno de caixa aberto. Abra o caixa antes de lançar consumo."
+                )
 
             product_ids = [
                 it["product_id"] for it in norm_items if it["kind"] == SaleItemKind.PRODUCT.value
@@ -588,11 +594,13 @@ class TabService:
 
             now = self._clock.now()
             tab_shift = uow.shifts.get_by_id(tab.shift_id, for_update=True)
-            if tab_shift is not None and tab_shift.status != ShiftStatus.OPEN:
+            if tab_shift is None or tab_shift.status != ShiftStatus.OPEN:
                 raise ShiftClosedError("Não é permitido registrar pagamentos em um turno já fechado.")
             shift = uow.shifts.get_open_shift(for_update=True)
-            if shift is None:
-                shift = uow.shifts.create_open_shift(opened_by=actor.id, now=now)
+            if shift is None or shift.status != ShiftStatus.OPEN:
+                raise ShiftClosedError(
+                    "Não há turno de caixa aberto. Abra o caixa antes de registrar pagamentos."
+                )
 
             settings = uow.payment_settings.get(for_update=True)
 
@@ -793,11 +801,13 @@ class TabService:
 
             now = self._clock.now()
             tab_shift = uow.shifts.get_by_id(tab.shift_id, for_update=True)
-            if tab_shift is not None and tab_shift.status != ShiftStatus.OPEN:
+            if tab_shift is None or tab_shift.status != ShiftStatus.OPEN:
                 raise ShiftClosedError("Não é permitido registrar depósito de crédito em um turno já fechado.")
             shift = uow.shifts.get_open_shift(for_update=True)
-            if shift is None:
-                shift = uow.shifts.create_open_shift(opened_by=actor.id, now=now)
+            if shift is None or shift.status != ShiftStatus.OPEN:
+                raise ShiftClosedError(
+                    "Não há turno de caixa aberto. Abra o caixa antes de registrar depósito de crédito."
+                )
 
             settings = uow.payment_settings.get(for_update=True)
 
@@ -988,11 +998,13 @@ class TabService:
 
             now = self._clock.now()
             tab_shift = uow.shifts.get_by_id(tab.shift_id, for_update=True)
-            if tab_shift is not None and tab_shift.status != ShiftStatus.OPEN:
+            if tab_shift is None or tab_shift.status != ShiftStatus.OPEN:
                 raise ShiftClosedError("Não é permitido devolver crédito em um turno já fechado.")
             shift = uow.shifts.get_open_shift(for_update=True)
-            if shift is None:
-                shift = uow.shifts.create_open_shift(opened_by=actor.id, now=now)
+            if shift is None or shift.status != ShiftStatus.OPEN:
+                raise ShiftClosedError(
+                    "Não há turno de caixa aberto. Abra o caixa antes de devolver crédito."
+                )
 
             if tab.credit_balance <= ZERO:
                 raise InsufficientCreditError(
@@ -1334,6 +1346,12 @@ class TabService:
             if tab.net_principal_paid > tab.subtotal_consumed:
                 raise TabIncompleteOperationsError(
                     f"Não é possível encerrar a comanda #{tab.number}: há operações financeiras pendentes de conciliação."
+                )
+
+            shift = uow.shifts.get_by_id(tab.shift_id, for_update=True)
+            if shift is None or shift.status != ShiftStatus.OPEN:
+                raise ShiftClosedError(
+                    "Não é permitido encerrar comandas pertencentes a um turno já fechado."
                 )
 
             now = self._clock.now()

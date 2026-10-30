@@ -66,6 +66,22 @@ class ShiftClosedError(DomainError):
     code = "shift_closed"
 
 
+class ShiftNotFoundError(DomainError):
+    code = "shift_not_found"
+
+
+class ShiftAlreadyOpenError(DomainError):
+    code = "shift_already_open"
+
+
+class ShiftCloseBlockedError(DomainError):
+    code = "shift_close_blocked"
+
+    def __init__(self, message: str = "", details: dict = None):
+        super().__init__(message)
+        self.details = details
+
+
 class InvalidPaymentError(DomainError):
     code = "invalid_payment"
 

@@ -58,6 +58,8 @@ class CashMovementKind(str, Enum):
     CREDIT_DEPOSIT = "credit_deposit"
     CREDIT_REFUND = "credit_refund"
     REVERSAL = "reversal"
+    CASH_SUPPLY = "cash_supply"
+    CASH_WITHDRAWAL = "cash_withdrawal"
 
 
 class CashDirection(str, Enum):
@@ -124,6 +126,22 @@ class Shift:
     closed_at: Optional[datetime] = None
     counted_cash: Optional[Decimal] = None
     notes: Optional[str] = None
+    open_idempotency_key: Optional[str] = None
+    open_request_fingerprint: Optional[str] = None
+    expected_cash: Optional[Decimal] = None
+    cash_difference: Optional[Decimal] = None
+    expected_pix: Optional[Decimal] = None
+    counted_pix: Optional[Decimal] = None
+    pix_difference: Optional[Decimal] = None
+    expected_card: Optional[Decimal] = None
+    counted_card: Optional[Decimal] = None
+    card_difference: Optional[Decimal] = None
+    discrepancy_justification: Optional[str] = None
+    close_idempotency_key: Optional[str] = None
+    close_request_fingerprint: Optional[str] = None
+    closing_snapshot: Optional[str] = None
+    opened_by_name: Optional[str] = None
+    closed_by_name: Optional[str] = None
 
 
 @dataclass(frozen=True)

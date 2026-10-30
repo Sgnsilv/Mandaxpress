@@ -98,13 +98,46 @@ class ShiftRepository(ABC):
     def get_by_id(self, shift_id: int, for_update: bool = False) -> Optional[Shift]: ...
 
     @abstractmethod
-    def create_open_shift(self, opened_by: int, now: datetime,
-                          opening_cash: Decimal = Decimal("0.00")) -> Shift: ...
+    def get_by_open_idempotency_key(self, idempotency_key: str, for_update: bool = False) -> Optional[Shift]: ...
 
     @abstractmethod
-    def close_shift(self, shift_id: int, closed_by: int, now: datetime,
-                    counted_cash: Optional[Decimal] = None,
-                    notes: Optional[str] = None) -> Shift: ...
+    def get_by_close_idempotency_key(self, idempotency_key: str, for_update: bool = False) -> Optional[Shift]: ...
+
+    @abstractmethod
+    def list_shifts(self, status: Optional["ShiftStatus"] = None, limit: int = 50) -> List[Shift]: ...
+
+    @abstractmethod
+    def create_open_shift(
+        self,
+        opened_by: int,
+        now: datetime,
+        opening_cash: Decimal = Decimal("0.00"),
+        notes: Optional[str] = None,
+        open_idempotency_key: Optional[str] = None,
+        open_request_fingerprint: Optional[str] = None,
+    ) -> Shift: ...
+
+    @abstractmethod
+    def close_shift(
+        self,
+        shift_id: int,
+        closed_by: int,
+        now: datetime,
+        counted_cash: Optional[Decimal] = None,
+        notes: Optional[str] = None,
+        expected_cash: Optional[Decimal] = None,
+        cash_difference: Optional[Decimal] = None,
+        expected_pix: Optional[Decimal] = None,
+        counted_pix: Optional[Decimal] = None,
+        pix_difference: Optional[Decimal] = None,
+        expected_card: Optional[Decimal] = None,
+        counted_card: Optional[Decimal] = None,
+        card_difference: Optional[Decimal] = None,
+        discrepancy_justification: Optional[str] = None,
+        closing_snapshot: Optional[str] = None,
+        close_idempotency_key: Optional[str] = None,
+        close_request_fingerprint: Optional[str] = None,
+    ) -> Shift: ...
 
 
 class SaleRepository(ABC):
@@ -185,6 +218,7 @@ class TabRepository(ABC):
         number: Optional[int] = None,
         search: Optional[str] = None,
         limit: int = 100,
+        shift_id: Optional[int] = None,
     ) -> List[Tab]: ...
 
     @abstractmethod
@@ -257,6 +291,12 @@ class CashMovementRepository(ABC):
         method: PaymentMethod,
         notes: Optional[str] = None,
     ) -> None: ...
+
+    @abstractmethod
+    def list_drawer_movements(self, shift_id: int, for_update: bool = False) -> List[dict]: ...
+
+    @abstractmethod
+    def list_pending_refunds(self, shift_id: int, for_update: bool = False) -> List[dict]: ...
 
     @abstractmethod
     def get_financial_summary(self, shift_id: Optional[int] = None) -> dict: ...

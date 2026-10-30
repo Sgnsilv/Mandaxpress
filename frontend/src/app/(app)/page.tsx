@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { TabsManager } from "@/components/TabsManager";
 import { ApiError, apiFetch } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import {
@@ -10,6 +11,7 @@ import {
   PaymentSettings,
   Product,
   SaleRecord,
+  TabRecord,
   calculateCardFeeCents,
   centsToApiDecimal,
   formatBRL,
@@ -18,7 +20,7 @@ import {
   parseToCents,
 } from "@/lib/money";
 
-type ActiveTab = "pos" | "history" | "products" | "settings";
+type ActiveTab = "pos" | "tabs" | "history" | "products" | "settings";
 
 interface CartItem {
   key: string;
@@ -46,6 +48,7 @@ export default function HomePage() {
     card_fee_mode: "simple_addition",
   });
   const [sales, setSales] = useState<SaleRecord[]>([]);
+  const [tabs, setTabs] = useState<TabRecord[]>([]);
   const [summary, setSummary] = useState<FinancialSummary | null>(null);
   const [loadingData, setLoadingData] = useState(true);
   const [globalError, setGlobalError] = useState<string | null>(null);
@@ -105,10 +108,11 @@ export default function HomePage() {
   const loadAll = useCallback(async () => {
     setGlobalError(null);
     try {
-      const [prodResp, setResp, salesResp] = await Promise.all([
+      const [prodResp, setResp, salesResp, tabsResp] = await Promise.all([
         apiFetch<{ products: Product[] }>("/products"),
         apiFetch<{ settings: PaymentSettings }>("/settings/payment"),
         apiFetch<{ sales: SaleRecord[]; summary: FinancialSummary }>("/sales?limit=50"),
+        apiFetch<{ tabs: TabRecord[] }>("/tabs?limit=200"),
       ]);
       setProducts(prodResp.products);
       setSettings(setResp.settings);
@@ -116,6 +120,7 @@ export default function HomePage() {
       setFeeModeInput(setResp.settings.card_fee_mode);
       setSales(salesResp.sales);
       setSummary(salesResp.summary);
+      setTabs(tabsResp.tabs);
     } catch (err) {
       setGlobalError(err instanceof ApiError ? err.message : "Erro ao carregar dados do caixa.");
     } finally {
@@ -616,6 +621,7 @@ export default function HomePage() {
   if (state.status !== "authenticated") return null;
   const { user } = state;
   const isAdmin = user.role === "admin";
+  const openTabsCount = tabs.filter((t) => t.status === "open").length;
 
   return (
     <main className="container">
@@ -626,6 +632,13 @@ export default function HomePage() {
           onClick={() => setActiveTab("pos")}
         >
           Caixa (Venda Rápida)
+        </button>
+        <button
+          type="button"
+          className={`nav-tab ${activeTab === "tabs" ? "active" : ""}`}
+          onClick={() => setActiveTab("tabs")}
+        >
+          Comandas ({openTabsCount} abertas)
         </button>
         <button
           type="button"
@@ -1049,6 +1062,17 @@ export default function HomePage() {
         </div>
       )}
 
+      {/* ==================== ABA: COMANDAS ABERTAS E ENCERRADAS ==================== */}
+      {activeTab === "tabs" && (
+        <TabsManager
+          tabs={tabs}
+          products={products}
+          settings={settings}
+          isAdmin={isAdmin}
+          onDataChanged={loadAll}
+        />
+      )}
+
       {/* ==================== ABA 2: HISTÓRICO E ESTORNOS ==================== */}
       {activeTab === "history" && (
         <section className="card" aria-label="Histórico de vendas e resumo financeiro">
@@ -1062,14 +1086,22 @@ export default function HomePage() {
           {summary && (
             <div className="grid" style={{ marginBottom: "1.25rem" }}>
               <div className="card" style={{ padding: "1rem" }}>
-                <div className="stat-label">Vendas ativas (produtos)</div>
+                <div className="stat-label">Consumo ativo (produtos)</div>
                 <div className="stat-value">
                   {formatBRL(summary.active_sales_subtotal)} ({summary.active_sales_count})
                 </div>
+                <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.2rem" }}>
+                  Venda rápida: {formatBRL(summary.quick_sales_subtotal ?? "0.00")} · Comandas: {formatBRL(summary.tabs_consumed_subtotal ?? "0.00")}
+                </div>
               </div>
               <div className="card" style={{ padding: "1rem" }}>
-                <div className="stat-label">Taxas de cartão repassadas</div>
-                <div className="stat-value">{formatBRL(summary.active_card_fees)}</div>
+                <div className="stat-label">Principal recebido e saldo em comandas</div>
+                <div className="stat-value">{formatBRL(summary.principal_received_total ?? summary.active_sales_subtotal)}</div>
+                <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.2rem" }}>
+                  Pendente em comandas ({summary.tabs_open_count ?? 0} abertas):{" "}
+                  <strong>{formatBRL(summary.tabs_pending_balance_total ?? "0.00")}</strong> · Taxas cartão:{" "}
+                  {formatBRL(summary.active_card_fees)}
+                </div>
               </div>
               <div className="card" style={{ padding: "1rem" }}>
                 <div className="stat-label">Recebimento contábil reconhecido</div>
@@ -1111,6 +1143,7 @@ export default function HomePage() {
                 <thead>
                   <tr>
                     <th>ID</th>
+                    <th>Origem</th>
                     <th>Status</th>
                     <th>Itens</th>
                     <th>Subtotal</th>
@@ -1124,10 +1157,20 @@ export default function HomePage() {
                 <tbody>
                   {sales.map((s) => {
                     const activePays = s.payments.filter((m) => m.kind === "sale_payment");
+                    const tabInfo = s.tab_id ? tabs.find((t) => t.id === s.tab_id) : null;
                     return (
                       <tr key={s.id}>
                         <td>
                           <strong>#{s.id}</strong>
+                        </td>
+                        <td>
+                          {s.kind === "tab_item" ? (
+                            <span className="badge">
+                              Comanda {tabInfo ? `#${tabInfo.number}` : `(ID ${s.tab_id})`}
+                            </span>
+                          ) : (
+                            <span className="muted" style={{ fontSize: "0.84rem" }}>Venda Rápida</span>
+                          )}
                         </td>
                         <td>
                           {s.status === "active" ? (
@@ -1154,26 +1197,34 @@ export default function HomePage() {
                           <strong>{formatBRL(s.total_charged)}</strong>
                         </td>
                         <td>
-                          {activePays.map((m) => (
-                            <div key={m.id} style={{ fontSize: "0.84rem" }}>
-                              <strong>{methodLabel(m.method)}</strong>: {formatBRL(m.gross_amount)}
-                              {m.fee_amount !== "0.00" && ` (taxa ${formatBRL(m.fee_amount)})`}
-                              {m.cash_tendered && (
-                                <span className="muted">
-                                  {" "}
-                                  [entregue {formatBRL(m.cash_tendered)}, troco{" "}
-                                  {formatBRL(m.change_given ?? "0.00")}]
-                                </span>
-                              )}
-                            </div>
-                          ))}
+                          {s.kind === "tab_item" ? (
+                            <span className="muted" style={{ fontSize: "0.82rem" }}>
+                              Liquidado via comanda
+                            </span>
+                          ) : (
+                            activePays.map((m) => (
+                              <div key={m.id} style={{ fontSize: "0.84rem" }}>
+                                <strong>{methodLabel(m.method)}</strong>: {formatBRL(m.gross_amount)}
+                                {m.fee_amount !== "0.00" && ` (taxa ${formatBRL(m.fee_amount)})`}
+                                {m.cash_tendered && (
+                                  <span className="muted">
+                                    {" "}
+                                    [entregue {formatBRL(m.cash_tendered)}, troco{" "}
+                                    {formatBRL(m.change_given ?? "0.00")}]
+                                  </span>
+                                )}
+                              </div>
+                            ))
+                          )}
                         </td>
                         <td>
-                          {s.status === "active" ? (
+                          {s.status === "active" || s.customer_refund_status === "not_applicable" ? (
                             <span className="muted">—</span>
                           ) : s.customer_refund_status === "completed" ? (
                             <div>
-                              <span className="badge badge-success">Devolvido ao cliente</span>
+                              <span className="badge badge-success">
+                                Devolvido ({formatBRL(s.customer_refund_amount ?? s.total_charged)})
+                              </span>
                               {s.customer_refund_method && (
                                 <div className="muted" style={{ fontSize: "0.78rem" }}>
                                   via {methodLabel(s.customer_refund_method)}
@@ -1182,7 +1233,9 @@ export default function HomePage() {
                               )}
                             </div>
                           ) : (
-                            <span className="badge badge-warning">Devolução pendente</span>
+                            <span className="badge badge-warning">
+                              Pendente ({formatBRL(s.customer_refund_amount ?? s.total_charged)})
+                            </span>
                           )}
                         </td>
                         {isAdmin && (
@@ -1581,9 +1634,9 @@ export default function HomePage() {
       {refundTarget && (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="refund-sale-title">
           <div className="modal-card">
-            <h2 id="refund-sale-title">Confirmar devolução ao cliente — Venda #{refundTarget.id}</h2>
+            <h2 id="refund-sale-title">Confirmar devolução ao cliente — Lançamento #{refundTarget.id}</h2>
             <p className="muted">
-              Registre que o valor de <strong>{formatBRL(refundTarget.total_charged)}</strong> referente à venda já estornada foi efetivamente devolvido ao cliente.
+              Registre que o valor de <strong>{formatBRL(refundTarget.customer_refund_amount ?? refundTarget.total_charged)}</strong> referente ao lançamento já estornado foi efetivamente devolvido ao cliente.
             </p>
             {refundError && <div className="alert alert-error">{refundError}</div>}
 

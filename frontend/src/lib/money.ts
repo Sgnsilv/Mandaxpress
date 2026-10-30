@@ -35,6 +35,8 @@ export interface SaleItemRecord {
 
 export interface CashMovementRecord {
   id: number;
+  tab_id?: number | null;
+  sale_id?: number | null;
   kind: "sale_payment" | "credit_deposit" | "credit_refund" | "reversal";
   method: PaymentMethod;
   direction: "in" | "out";
@@ -46,13 +48,17 @@ export interface CashMovementRecord {
   cash_tendered: string | null;
   change_given: string | null;
   reverses_id: number | null;
+  operator_id?: number;
   created_at: string;
+  idempotency_key?: string;
+  batch_key?: string | null;
   note?: string | null;
 }
 
 export interface SaleRecord {
   id: number;
   shift_id: number;
+  tab_id?: number | null;
   kind: "quick" | "tab_item";
   status: "active" | "voided";
   subtotal: string;
@@ -65,6 +71,7 @@ export interface SaleRecord {
   voided_at: string | null;
   void_reason: string | null;
   customer_refund_status: "not_applicable" | "pending" | "completed";
+  customer_refund_amount?: string;
   customer_refunded_at: string | null;
   customer_refunded_by: number | null;
   customer_refund_method: PaymentMethod | null;
@@ -73,16 +80,50 @@ export interface SaleRecord {
   payments: CashMovementRecord[];
 }
 
+export interface TabRecord {
+  id: number;
+  shift_id: number;
+  number: number;
+  customer_name: string | null;
+  status: "open" | "closed";
+  opened_by: number;
+  opened_at: string;
+  closed_by: number | null;
+  closed_at: string | null;
+  notes: string | null;
+  subtotal_consumed: string;
+  voided_subtotal: string;
+  principal_paid: string;
+  net_principal_paid: string;
+  card_fee_paid: string;
+  total_charged_paid: string;
+  balance_due: string;
+  pending_refund_total: string;
+  completed_refund_total: string;
+  can_close: boolean;
+  launches: SaleRecord[];
+  payments: CashMovementRecord[];
+}
+
 export interface FinancialSummary {
   active_sales_count: number;
   voided_sales_count: number;
   pending_customer_refunds_count: number;
   active_sales_subtotal: string;
+  quick_sales_subtotal?: string;
+  tabs_consumed_subtotal?: string;
+  principal_received_total?: string;
+  card_fees_received_total?: string;
+  card_fees_charged_total?: string;
+  card_fees_reversed_total?: string;
   active_card_fees: string;
   active_total_charged: string;
   voided_total_charged: string;
   pending_customer_refunds_total: string;
   completed_customer_refunds_total: string;
+  tabs_open_count?: number;
+  tabs_closed_count?: number;
+  tabs_pending_balance_total?: string;
   by_method: Record<
     PaymentMethod,
     {

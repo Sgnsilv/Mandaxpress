@@ -3,11 +3,12 @@
 PDV (frente de caixa) simples para eventos, derivado conceitualmente do
 Mandaladaka. Primeiro uso: **Festival do Açaí — 31/10/2026**.
 
-> **Estado: Bloco 1 (fundação) concluído. O projeto NÃO está pronto para uso
-> real.** Há login, sessão, perfis, banco, Docker e testes. Venda rápida,
-> comandas, créditos, estornos e fechamento **ainda não existem**. Não use com
-> dinheiro real nem exponha na internet nesta etapa. Nenhum deploy foi feito.
-> O modelo financeiro proposto para os próximos blocos está em
+> **Estado: Blocos 1 e 2 concluídos. O projeto ainda NÃO está pronto para uso
+> completo em produção.** Já existem login, sessão, perfis, gerenciamento de
+> produtos, venda rápida, pagamentos (Pix, cartão e dinheiro com troco), taxa de
+> cartão configurável e estornos de venda rápida. Comandas abertas, créditos
+> antecipados e fechamento completo de turno serão entregues nos próximos blocos.
+> O modelo financeiro detalhado está em
 > [docs/financial-model.md](docs/financial-model.md).
 
 ## Stack

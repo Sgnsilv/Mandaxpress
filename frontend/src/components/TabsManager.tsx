@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, apiFetch } from "@/lib/api";
 import {
+  CashMovementRecord,
   PaymentMethod,
   PaymentSettings,
   Product,
@@ -40,6 +41,21 @@ interface TabsManagerProps {
   onDataChanged: () => Promise<void>;
 }
 
+function blockerLabel(code: string): string {
+  switch (code) {
+    case "credit_balance_pending":
+      return "Há saldo de crédito disponível ao cliente (consuma ou registre a devolução antes de encerrar).";
+    case "balance_due_pending":
+      return "Há saldo devedor pendente de pagamento.";
+    case "customer_refund_pending":
+      return "Há devolução pendente de consumo cancelado aguardando confirmação.";
+    case "already_closed":
+      return "A comanda já está encerrada.";
+    default:
+      return code;
+  }
+}
+
 export function TabsManager({
   tabs,
   products,
@@ -58,8 +74,10 @@ export function TabsManager({
   const [openingTab, setOpeningTab] = useState(false);
   const [openTabError, setOpenTabError] = useState<string | null>(null);
 
-  // Modo de operação dentro da comanda aberta: lançar consumo vs registrar pagamento
-  const [actionMode, setActionMode] = useState<"consume" | "pay">("consume");
+  // Modo de operação dentro da comanda aberta
+  const [actionMode, setActionMode] = useState<
+    "consume" | "credit_deposit" | "pay" | "credit_refund"
+  >("consume");
   const [feedbackMsg, setFeedbackMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
   // Rascunho de novo lançamento de consumo
@@ -72,13 +90,30 @@ export function TabsManager({
   const [launchIdemKey, setLaunchIdemKey] = useState<string>(() => generateIdempotencyKey());
   const [submittingLaunch, setSubmittingLaunch] = useState(false);
 
-  // Rascunho de pagamento parcial/integral na comanda
+  // Rascunho de depósito antecipado de crédito
+  const [creditDrafts, setCreditDrafts] = useState<PaymentDraft[]>([
+    { id: "tcred-1", method: "pix", amountInput: "", cashTenderedInput: "" },
+  ]);
+  const [creditNote, setCreditNote] = useState("");
+  const [creditIdemKey, setCreditIdemKey] = useState<string>(() => generateIdempotencyKey());
+  const [submittingCredit, setSubmittingCredit] = useState(false);
+
+  // Rascunho de pagamento parcial/integral de saldo devedor na comanda
   const [paymentDrafts, setPaymentDrafts] = useState<PaymentDraft[]>([
     { id: "tpay-1", method: "pix", amountInput: "", cashTenderedInput: "" },
   ]);
   const [paymentNote, setPaymentNote] = useState("");
   const [payIdemKey, setPayIdemKey] = useState<string>(() => generateIdempotencyKey());
   const [submittingPayment, setSubmittingPayment] = useState(false);
+
+  // Rascunho de devolução de saldo de crédito ao cliente
+  const [creditRefundMethod, setCreditRefundMethod] = useState<PaymentMethod>("cash");
+  const [creditRefundAmount, setCreditRefundAmount] = useState("");
+  const [creditRefundNote, setCreditRefundNote] = useState("");
+  const [creditRefundIdemKey, setCreditRefundIdemKey] = useState<string>(() =>
+    generateIdempotencyKey(),
+  );
+  const [submittingCreditRefund, setSubmittingCreditRefund] = useState(false);
 
   // Modal de confirmação de encerramento da comanda
   const [closeModalOpen, setCloseModalOpen] = useState(false);
@@ -100,6 +135,22 @@ export function TabsManager({
   const [refundNotes, setRefundNotes] = useState("");
   const [submittingRefund, setSubmittingRefund] = useState(false);
   const [refundError, setRefundError] = useState<string | null>(null);
+
+  // Modal de estorno administrativo de depósito de crédito (admin)
+  const [voidCreditTarget, setVoidCreditTarget] = useState<CashMovementRecord | null>(null);
+  const [voidCreditReason, setVoidCreditReason] = useState("");
+  const [voidCreditRefundCompleted, setVoidCreditRefundCompleted] = useState(false);
+  const [voidCreditMethod, setVoidCreditMethod] = useState<PaymentMethod>("pix");
+  const [voidCreditNotes, setVoidCreditNotes] = useState("");
+  const [submittingVoidCredit, setSubmittingVoidCredit] = useState(false);
+  const [voidCreditError, setVoidCreditError] = useState<string | null>(null);
+
+  // Modal de confirmação de devolução efetiva de depósito cancelado (admin)
+  const [refundCreditTarget, setRefundCreditTarget] = useState<CashMovementRecord | null>(null);
+  const [refundCreditMethod, setRefundCreditMethod] = useState<PaymentMethod>("pix");
+  const [refundCreditNotes, setRefundCreditNotes] = useState("");
+  const [submittingRefundCredit, setSubmittingRefundCredit] = useState(false);
+  const [refundCreditError, setRefundCreditError] = useState<string | null>(null);
 
   const openTabsCount = useMemo(() => tabs.filter((t) => t.status === "open").length, [tabs]);
   const closedTabsCount = useMemo(() => tabs.filter((t) => t.status === "closed").length, [tabs]);
@@ -132,12 +183,18 @@ export function TabsManager({
     [selectedTab],
   );
 
+  const creditBalanceCents = useMemo(
+    () => (selectedTab ? (parseToCents(selectedTab.credit_balance ?? "0.00") ?? 0) : 0),
+    [selectedTab],
+  );
+
   const selectTab = useCallback((tab: TabRecord) => {
     setSelectedTabId(tab.id);
     setFeedbackMsg(null);
     setLaunchCart([]);
     setLaunchIdemKey(generateIdempotencyKey());
     const balCents = parseToCents(tab.balance_due) ?? 0;
+    const credBalCents = parseToCents(tab.credit_balance ?? "0.00") ?? 0;
     setPaymentDrafts([
       {
         id: "tpay-1",
@@ -147,6 +204,17 @@ export function TabsManager({
       },
     ]);
     setPayIdemKey(generateIdempotencyKey());
+    setCreditDrafts([
+      {
+        id: "tcred-1",
+        method: "pix",
+        amountInput: "",
+        cashTenderedInput: "",
+      },
+    ]);
+    setCreditIdemKey(generateIdempotencyKey());
+    setCreditRefundAmount(credBalCents > 0 ? centsToApiDecimal(credBalCents) : "");
+    setCreditRefundIdemKey(generateIdempotencyKey());
   }, []);
 
   const activeProducts = useMemo(() => products.filter((p) => p.is_active), [products]);
@@ -170,6 +238,52 @@ export function TabsManager({
   const launchSubtotalCents = useMemo(
     () => launchCart.reduce((acc, it) => acc + it.unitPriceCents * it.quantity, 0),
     [launchCart],
+  );
+
+  // Cálculos do rascunho de depósito de crédito
+  const computedCredits = useMemo(() => {
+    return creditDrafts.map((p) => {
+      const amountCents = parseToCents(p.amountInput) ?? 0;
+      const feeCents =
+        p.method === "card"
+          ? calculateCardFeeCents(amountCents, settings.card_fee_percent, settings.card_fee_mode)
+          : 0;
+      const grossCents = amountCents + feeCents;
+      const tenderedCents =
+        p.method === "cash"
+          ? p.cashTenderedInput.trim()
+            ? (parseToCents(p.cashTenderedInput) ?? 0)
+            : amountCents
+          : null;
+      const changeCents =
+        p.method === "cash" && tenderedCents !== null ? tenderedCents - grossCents : null;
+      return {
+        ...p,
+        amountCents,
+        feeCents,
+        grossCents,
+        tenderedCents,
+        changeCents,
+      };
+    });
+  }, [creditDrafts, settings]);
+
+  const creditPrincipalSumCents = useMemo(
+    () => computedCredits.reduce((acc, p) => acc + p.amountCents, 0),
+    [computedCredits],
+  );
+  const creditFeeSumCents = useMemo(
+    () => computedCredits.reduce((acc, p) => acc + p.feeCents, 0),
+    [computedCredits],
+  );
+  const creditGrossSumCents = creditPrincipalSumCents + creditFeeSumCents;
+  const creditChangeSumCents = useMemo(
+    () =>
+      computedCredits.reduce(
+        (acc, p) => acc + (p.changeCents !== null && p.changeCents > 0 ? p.changeCents : 0),
+        0,
+      ),
+    [computedCredits],
   );
 
   // Cálculos do rascunho de pagamento na comanda
@@ -218,6 +332,24 @@ export function TabsManager({
       ),
     [computedPayments],
   );
+
+  // Cálculo do rascunho de devolução de saldo de crédito
+  const creditRefundInputCents = useMemo(
+    () => parseToCents(creditRefundAmount) ?? 0,
+    [creditRefundAmount],
+  );
+
+  // Identifica quais depósitos de crédito já foram estornados
+  const reversedCreditMovementIds = useMemo(() => {
+    const s = new Set<number>();
+    if (!selectedTab) return s;
+    for (const m of selectedTab.credit_deposits ?? []) {
+      if (m.kind === "reversal" && m.reverses_id !== null) {
+        s.add(m.reverses_id);
+      }
+    }
+    return s;
+  }, [selectedTab]);
 
   async function handleOpenTab(e: React.FormEvent) {
     e.preventDefault();
@@ -359,6 +491,108 @@ export function TabsManager({
       setLaunchCart([]);
       setLaunchIdemKey(generateIdempotencyKey());
       const newBalCents = parseToCents(resp.tab.balance_due) ?? 0;
+      const newCredBalCents = parseToCents(resp.tab.credit_balance ?? "0.00") ?? 0;
+      setPaymentDrafts([
+        {
+          id: "tpay-1",
+          method: "pix",
+          amountInput: newBalCents > 0 ? centsToApiDecimal(newBalCents) : "",
+          cashTenderedInput: "",
+        },
+      ]);
+      setPayIdemKey(generateIdempotencyKey());
+      setCreditRefundAmount(newCredBalCents > 0 ? centsToApiDecimal(newCredBalCents) : "");
+      setCreditRefundIdemKey(generateIdempotencyKey());
+      await onDataChanged();
+      setFeedbackMsg({
+        type: "ok",
+        text: `Lançamento de ${formatBRL(resp.launch.subtotal)} registrado na Comanda #${resp.tab.number}. Crédito aplicado: ${formatBRL(resp.tab.credit_applied)} · Crédito restante: ${formatBRL(resp.tab.credit_balance)} · Saldo a pagar: ${formatBRL(resp.tab.balance_due)}.`,
+      });
+    } catch (err) {
+      setFeedbackMsg({
+        type: "err",
+        text: err instanceof ApiError ? err.message : "Erro ao registrar lançamento na comanda.",
+      });
+    } finally {
+      setSubmittingLaunch(false);
+    }
+  }
+
+  // Manipuladores de rascunho de depósito de crédito
+  function addCreditDraftLine() {
+    setCreditIdemKey(generateIdempotencyKey());
+    setCreditDrafts((prev) => [
+      ...prev,
+      {
+        id: `tcred-${Date.now()}-${prev.length + 1}`,
+        method: "cash",
+        amountInput: "",
+        cashTenderedInput: "",
+      },
+    ]);
+  }
+
+  function removeCreditDraftLine(id: string) {
+    setCreditIdemKey(generateIdempotencyKey());
+    setCreditDrafts((prev) => (prev.length <= 1 ? prev : prev.filter((p) => p.id !== id)));
+  }
+
+  function updateCreditDraftLine(id: string, patch: Partial<PaymentDraft>) {
+    setCreditIdemKey(generateIdempotencyKey());
+    setCreditDrafts((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  }
+
+  async function handleConfirmCreditDeposit() {
+    if (!selectedTab || submittingCredit) return;
+    setFeedbackMsg(null);
+
+    for (const p of computedCredits) {
+      if (p.amountCents <= 0) {
+        setFeedbackMsg({
+          type: "err",
+          text: "Informe um valor de depósito maior que R$ 0,00 em cada linha.",
+        });
+        return;
+      }
+      if (p.method === "cash" && p.tenderedCents !== null && p.tenderedCents < p.amountCents) {
+        setFeedbackMsg({
+          type: "err",
+          text: "O valor entregue em dinheiro não pode ser menor que o valor do depósito em dinheiro.",
+        });
+        return;
+      }
+    }
+
+    setSubmittingCredit(true);
+    try {
+      const payload = {
+        idempotency_key: creditIdemKey,
+        payments: computedCredits.map((p) => ({
+          method: p.method,
+          amount: centsToApiDecimal(p.amountCents),
+          cash_tendered:
+            p.method === "cash" && p.tenderedCents !== null
+              ? centsToApiDecimal(p.tenderedCents)
+              : undefined,
+        })),
+        note: creditNote.trim() || undefined,
+      };
+      const resp = await apiFetch<{ tab: TabRecord; idempotent_replay: boolean }>(
+        `/tabs/${selectedTab.id}/credits`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+      );
+      setCreditDrafts([
+        { id: "tcred-1", method: "pix", amountInput: "", cashTenderedInput: "" },
+      ]);
+      setCreditNote("");
+      setCreditIdemKey(generateIdempotencyKey());
+      const newCredBalCents = parseToCents(resp.tab.credit_balance ?? "0.00") ?? 0;
+      const newBalCents = parseToCents(resp.tab.balance_due) ?? 0;
+      setCreditRefundAmount(newCredBalCents > 0 ? centsToApiDecimal(newCredBalCents) : "");
+      setCreditRefundIdemKey(generateIdempotencyKey());
       setPaymentDrafts([
         {
           id: "tpay-1",
@@ -371,18 +605,19 @@ export function TabsManager({
       await onDataChanged();
       setFeedbackMsg({
         type: "ok",
-        text: `Lançamento de ${formatBRL(resp.launch.subtotal)} registrado na Comanda #${resp.tab.number}. Novo saldo pendente: ${formatBRL(resp.tab.balance_due)}.`,
+        text: `Depósito de crédito registrado na Comanda #${resp.tab.number}! Crédito disponível: ${formatBRL(resp.tab.credit_balance)} · Crédito aplicado ao consumo: ${formatBRL(resp.tab.credit_applied)}.`,
       });
     } catch (err) {
       setFeedbackMsg({
         type: "err",
-        text: err instanceof ApiError ? err.message : "Erro ao registrar lançamento na comanda.",
+        text: err instanceof ApiError ? err.message : "Erro ao registrar depósito de crédito.",
       });
     } finally {
-      setSubmittingLaunch(false);
+      setSubmittingCredit(false);
     }
   }
 
+  // Manipuladores de pagamento de saldo devedor
   function addPaymentDraftLine() {
     setPayIdemKey(generateIdempotencyKey());
     const rest = Math.max(0, balanceDueCents - paymentPrincipalSumCents);
@@ -444,7 +679,7 @@ export function TabsManager({
     if (paymentPrincipalSumCents > balanceDueCents) {
       setFeedbackMsg({
         type: "err",
-        text: `O principal informado (${formatBRL(paymentPrincipalSumCents)}) excede o saldo pendente da comanda (${formatBRL(balanceDueCents)}). Para troco em dinheiro, informe o valor entregue no campo "Valor entregue".`,
+        text: `O principal informado (${formatBRL(paymentPrincipalSumCents)}) excede o saldo a pagar da comanda (${formatBRL(balanceDueCents)}). Para crédito antecipado, utilize a aba "+ Depositar Crédito".`,
       });
       return;
     }
@@ -486,8 +721,8 @@ export function TabsManager({
         type: "ok",
         text:
           newBalCents === 0
-            ? `Pagamento registrado! Saldo da Comanda #${resp.tab.number} quitado (R$ 0,00). Você já pode encerrar a comanda.`
-            : `Pagamento parcial registrado! Saldo pendente restante da Comanda #${resp.tab.number}: ${formatBRL(resp.tab.balance_due)}.`,
+            ? `Pagamento registrado! Saldo devedor da Comanda #${resp.tab.number} quitado (R$ 0,00).`
+            : `Pagamento parcial registrado! Saldo a pagar restante da Comanda #${resp.tab.number}: ${formatBRL(resp.tab.balance_due)}.`,
       });
     } catch (err) {
       setFeedbackMsg({
@@ -496,6 +731,63 @@ export function TabsManager({
       });
     } finally {
       setSubmittingPayment(false);
+    }
+  }
+
+  // Manipulador de devolução de saldo de crédito ao cliente
+  async function handleConfirmCreditRefund(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedTab || submittingCreditRefund) return;
+    setFeedbackMsg(null);
+
+    if (creditRefundInputCents <= 0) {
+      setFeedbackMsg({
+        type: "err",
+        text: "Informe um valor maior que R$ 0,00 para devolver ao cliente.",
+      });
+      return;
+    }
+    if (creditRefundInputCents > creditBalanceCents) {
+      setFeedbackMsg({
+        type: "err",
+        text: `O valor informado (${formatBRL(creditRefundInputCents)}) excede o saldo de crédito disponível (${formatBRL(creditBalanceCents)}).`,
+      });
+      return;
+    }
+
+    setSubmittingCreditRefund(true);
+    try {
+      const resp = await apiFetch<{ tab: TabRecord; idempotent_replay: boolean }>(
+        `/tabs/${selectedTab.id}/credit-refunds`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            idempotency_key: creditRefundIdemKey,
+            method: creditRefundMethod,
+            amount: centsToApiDecimal(creditRefundInputCents),
+            note: creditRefundNote.trim() || undefined,
+          }),
+        },
+      );
+      const newCredBalCents = parseToCents(resp.tab.credit_balance ?? "0.00") ?? 0;
+      setCreditRefundAmount(newCredBalCents > 0 ? centsToApiDecimal(newCredBalCents) : "");
+      setCreditRefundNote("");
+      setCreditRefundIdemKey(generateIdempotencyKey());
+      await onDataChanged();
+      setFeedbackMsg({
+        type: "ok",
+        text:
+          newCredBalCents === 0
+            ? `Devolução de crédito registrada via ${methodLabel(creditRefundMethod)}! Saldo de crédito zerado (R$ 0,00).`
+            : `Devolução parcial registrada via ${methodLabel(creditRefundMethod)}! Saldo de crédito restante: ${formatBRL(resp.tab.credit_balance)}.`,
+      });
+    } catch (err) {
+      setFeedbackMsg({
+        type: "err",
+        text: err instanceof ApiError ? err.message : "Erro ao registrar devolução de crédito.",
+      });
+    } finally {
+      setSubmittingCreditRefund(false);
     }
   }
 
@@ -590,6 +882,75 @@ export function TabsManager({
     }
   }
 
+  async function handleVoidCreditDeposit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedTab || !voidCreditTarget || submittingVoidCredit) return;
+    setVoidCreditError(null);
+    if (voidCreditReason.trim().length < 3) {
+      setVoidCreditError("Informe o motivo obrigatório do estorno (mínimo 3 caracteres).");
+      return;
+    }
+    setSubmittingVoidCredit(true);
+    try {
+      await apiFetch(`/tabs/${selectedTab.id}/credits/${voidCreditTarget.id}/void`, {
+        method: "POST",
+        body: JSON.stringify({
+          reason: voidCreditReason.trim(),
+          customer_refund_completed: voidCreditRefundCompleted,
+          customer_refund_method: voidCreditRefundCompleted ? voidCreditMethod : undefined,
+          customer_refund_notes:
+            voidCreditRefundCompleted && voidCreditNotes.trim()
+              ? voidCreditNotes.trim()
+              : undefined,
+        }),
+      });
+      setVoidCreditTarget(null);
+      setVoidCreditReason("");
+      setVoidCreditRefundCompleted(false);
+      setVoidCreditNotes("");
+      await onDataChanged();
+      setFeedbackMsg({
+        type: "ok",
+        text: voidCreditRefundCompleted
+          ? `Depósito #${voidCreditTarget.id} estornado e devolução financeira registrada com sucesso.`
+          : `Depósito #${voidCreditTarget.id} cancelado contabilmente (devolução financeira pendente ao cliente).`,
+      });
+    } catch (err) {
+      setVoidCreditError(err instanceof ApiError ? err.message : "Erro ao estornar depósito.");
+    } finally {
+      setSubmittingVoidCredit(false);
+    }
+  }
+
+  async function handleConfirmCreditDepositRefund(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedTab || !refundCreditTarget || submittingRefundCredit) return;
+    setRefundCreditError(null);
+    setSubmittingRefundCredit(true);
+    try {
+      await apiFetch(`/tabs/${selectedTab.id}/credits/${refundCreditTarget.id}/customer-refund`, {
+        method: "POST",
+        body: JSON.stringify({
+          method: refundCreditMethod,
+          notes: refundCreditNotes.trim() || undefined,
+        }),
+      });
+      setRefundCreditTarget(null);
+      setRefundCreditNotes("");
+      await onDataChanged();
+      setFeedbackMsg({
+        type: "ok",
+        text: "Devolução financeira do depósito cancelado registrada com sucesso.",
+      });
+    } catch (err) {
+      setRefundCreditError(
+        err instanceof ApiError ? err.message : "Erro ao confirmar devolução do depósito.",
+      );
+    } finally {
+      setSubmittingRefundCredit(false);
+    }
+  }
+
   return (
     <div className="pos-layout">
       {/* ==================== COLUNA ESQUERDA: ABERTURA E LISTA DE COMANDAS ==================== */}
@@ -622,7 +983,7 @@ export function TabsManager({
               required
               className="input"
               style={{ width: "100%" }}
-              placeholder="Ex.: 12"
+              placeholder="Ex.: 15"
               value={newTabNumber}
               onChange={(e) => setNewTabNumber(e.target.value)}
             />
@@ -679,7 +1040,7 @@ export function TabsManager({
           type="search"
           className="input"
           style={{ width: "100%", marginBottom: "0.85rem" }}
-          placeholder="Buscar comanda por número (ex.: 12) ou nome do cliente…"
+          placeholder="Buscar comanda por número (ex.: 15) ou nome do cliente…"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           aria-label="Buscar comanda por número ou cliente"
@@ -694,6 +1055,7 @@ export function TabsManager({
             {filteredTabs.map((t) => {
               const isSelected = selectedTab?.id === t.id;
               const balCents = parseToCents(t.balance_due) ?? 0;
+              const credCents = parseToCents(t.credit_balance ?? "0.00") ?? 0;
               return (
                 <button
                   key={t.id}
@@ -727,19 +1089,27 @@ export function TabsManager({
                       {t.status === "open" ? "Aberta" : "Encerrada"}
                     </span>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: "0.4rem", fontSize: "0.86rem", flexWrap: "wrap", gap: "0.5rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: "0.4rem", fontSize: "0.84rem", flexWrap: "wrap", gap: "0.5rem" }}>
                     <span className="muted">
-                      Consumo: <strong>{formatBRL(t.subtotal_consumed)}</strong> · Pago:{" "}
+                      Consumo: <strong>{formatBRL(t.subtotal_consumed)}</strong> · Créd. dep.:{" "}
+                      <strong>{formatBRL(t.credit_deposited ?? "0.00")}</strong> · Pago:{" "}
                       <strong>{formatBRL(t.principal_paid)}</strong>
                     </span>
-                    <span
-                      style={{
-                        fontWeight: 800,
-                        color: balCents > 0 ? "var(--danger)" : "var(--success)",
-                      }}
-                    >
-                      {balCents > 0 ? `Pendente: ${formatBRL(t.balance_due)}` : "Saldo: R$ 0,00"}
-                    </span>
+                    <div style={{ display: "flex", gap: "0.6rem" }}>
+                      {credCents > 0 && (
+                        <span style={{ fontWeight: 800, color: "var(--primary-dark)" }}>
+                          Crédito: {formatBRL(t.credit_balance)}
+                        </span>
+                      )}
+                      <span
+                        style={{
+                          fontWeight: 800,
+                          color: balCents > 0 ? "var(--danger)" : "var(--success)",
+                        }}
+                      >
+                        {balCents > 0 ? `A pagar: ${formatBRL(t.balance_due)}` : "A pagar: R$ 0,00"}
+                      </span>
+                    </div>
                   </div>
                 </button>
               );
@@ -752,7 +1122,7 @@ export function TabsManager({
       <section className="card" aria-label="Detalhes e operações da comanda selecionada">
         {!selectedTab ? (
           <p className="muted">
-            Selecione uma comanda ao lado ou abra uma nova comanda para lançar produtos e registrar pagamentos.
+            Selecione uma comanda ao lado ou abra uma nova comanda para lançar produtos, registrar crédito antecipado ou pagamentos.
           </p>
         ) : (
           <>
@@ -782,8 +1152,8 @@ export function TabsManager({
                   disabled={!selectedTab.can_close}
                   title={
                     selectedTab.can_close
-                      ? "Encerrar comanda com saldo zero"
-                      : "Quite o saldo pendente para encerrar a comanda"
+                      ? "Encerrar comanda com saldos zerados"
+                      : (selectedTab.close_blockers ?? []).map(blockerLabel).join(" ")
                   }
                   onClick={() => {
                     setCloseNotes("");
@@ -795,14 +1165,28 @@ export function TabsManager({
               )}
             </div>
 
-            {/* Painel de destaque de Saldo Pendente e Resumo da Comanda */}
+            {/* Painel de destaque de Saldos (Consumo, Crédito Antecipado, Devolução e Saldo a Pagar) */}
             <div className="totals-box" style={{ marginTop: "0.9rem" }} aria-live="polite">
               <div className="totals-row">
-                <span>Consumo ativo acumulado:</span>
+                <span>Consumo total ativo:</span>
                 <strong>{formatBRL(selectedTab.subtotal_consumed)}</strong>
               </div>
               <div className="totals-row">
-                <span>Principal já quitado:</span>
+                <span>Crédito depositado (líquido):</span>
+                <strong>{formatBRL(selectedTab.credit_deposited ?? "0.00")}</strong>
+              </div>
+              <div className="totals-row">
+                <span>Crédito aplicado ao consumo:</span>
+                <strong style={{ color: "var(--primary-dark)" }}>
+                  {formatBRL(selectedTab.credit_applied ?? "0.00")}
+                </strong>
+              </div>
+              <div className="totals-row">
+                <span>Crédito já devolvido ao cliente:</span>
+                <strong>{formatBRL(selectedTab.credit_refunded ?? "0.00")}</strong>
+              </div>
+              <div className="totals-row">
+                <span>Pagamentos complementares (principal):</span>
                 <strong style={{ color: "var(--success)" }}>{formatBRL(selectedTab.principal_paid)}</strong>
               </div>
               {selectedTab.card_fee_paid !== "0.00" && (
@@ -811,8 +1195,19 @@ export function TabsManager({
                   <strong>{formatBRL(selectedTab.card_fee_paid)}</strong>
                 </div>
               )}
+              <div className="totals-row grand" style={{ borderTop: "1px dashed var(--border)", paddingTop: "0.45rem" }}>
+                <span>Saldo de crédito disponível:</span>
+                <span
+                  id="tab-credit-balance"
+                  style={{
+                    color: creditBalanceCents > 0 ? "var(--primary-dark)" : "var(--muted)",
+                  }}
+                >
+                  {formatBRL(selectedTab.credit_balance ?? "0.00")}
+                </span>
+              </div>
               <div className="totals-row grand">
-                <span>Saldo pendente da comanda:</span>
+                <span>Saldo a pagar da comanda:</span>
                 <span
                   id="tab-balance-due"
                   style={{
@@ -823,6 +1218,15 @@ export function TabsManager({
                 </span>
               </div>
             </div>
+
+            {selectedTab.status === "open" &&
+              !selectedTab.can_close &&
+              (selectedTab.close_blockers ?? []).length > 0 && (
+                <div className="alert alert-warning" style={{ marginTop: "0.6rem", fontSize: "0.86rem" }}>
+                  <strong>Para encerrar esta comanda:</strong>{" "}
+                  {(selectedTab.close_blockers ?? []).map(blockerLabel).join(" ")}
+                </div>
+              )}
 
             {selectedTab.pending_refund_total !== "0.00" && (
               <div className="alert alert-warning" role="alert">
@@ -844,19 +1248,24 @@ export function TabsManager({
             {/* Operações exclusivas para comandas ABERTAS */}
             {selectedTab.status === "open" && (
               <div style={{ marginTop: "1rem" }}>
-                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.9rem" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(175px, 1fr))", gap: "0.45rem", marginBottom: "0.9rem" }}>
                   <button
                     type="button"
-                    className={`btn ${actionMode === "consume" ? "" : "btn-secondary"}`}
-                    style={{ flex: 1 }}
+                    className={`btn btn-sm ${actionMode === "consume" ? "" : "btn-secondary"}`}
                     onClick={() => setActionMode("consume")}
                   >
-                    + Lançar Consumo (Produtos / Avulso)
+                    + Lançar Consumo
                   </button>
                   <button
                     type="button"
-                    className={`btn ${actionMode === "pay" ? "" : "btn-secondary"}`}
-                    style={{ flex: 1 }}
+                    className={`btn btn-sm ${actionMode === "credit_deposit" ? "" : "btn-secondary"}`}
+                    onClick={() => setActionMode("credit_deposit")}
+                  >
+                    + Depositar Crédito
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${actionMode === "pay" ? "" : "btn-secondary"}`}
                     onClick={() => {
                       setActionMode("pay");
                       if (
@@ -873,7 +1282,19 @@ export function TabsManager({
                       }
                     }}
                   >
-                    $ Registrar Pagamento ({formatBRL(selectedTab.balance_due)})
+                    $ Pagar Saldo ({formatBRL(selectedTab.balance_due)})
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${actionMode === "credit_refund" ? "" : "btn-secondary"}`}
+                    onClick={() => {
+                      setActionMode("credit_refund");
+                      if (!creditRefundAmount && creditBalanceCents > 0) {
+                        setCreditRefundAmount(centsToApiDecimal(creditBalanceCents));
+                      }
+                    }}
+                  >
+                    ↩ Devolver Crédito ({formatBRL(selectedTab.credit_balance ?? "0.00")})
                   </button>
                 </div>
 
@@ -883,6 +1304,11 @@ export function TabsManager({
                     <h3 style={{ fontSize: "1rem", margin: "0 0 0.6rem" }}>
                       Novo lançamento de consumo na Comanda #{selectedTab.number}
                     </h3>
+                    {creditBalanceCents > 0 && (
+                      <p className="muted" style={{ fontSize: "0.84rem", marginTop: 0, marginBottom: "0.6rem" }}>
+                        Crédito disponível de <strong>{formatBRL(creditBalanceCents)}</strong> será abatido automaticamente ao confirmar o lançamento (sem gerar nova entrada de caixa).
+                      </p>
+                    )}
 
                     <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "0.5rem", marginBottom: "0.65rem" }}>
                       <input
@@ -1024,12 +1450,181 @@ export function TabsManager({
                   </div>
                 )}
 
-                {/* SUB-PAINEL 2: REGISTRAR PAGAMENTO PARCIAL OU INTEGRAL */}
+                {/* SUB-PAINEL 2: DEPOSITAR CRÉDITO ANTECIPADO */}
+                {actionMode === "credit_deposit" && (
+                  <div style={{ padding: "0.9rem", border: "1px solid var(--border)", borderRadius: 12, background: "#fcfaff" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.45rem" }}>
+                      <h3 style={{ fontSize: "1rem", margin: 0 }}>
+                        Depositar crédito antecipado — Comanda #{selectedTab.number}
+                      </h3>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={addCreditDraftLine}
+                      >
+                        + Dividir depósito
+                      </button>
+                    </div>
+                    <p className="muted" style={{ fontSize: "0.83rem", marginTop: 0, marginBottom: "0.75rem" }}>
+                      O depósito antecipado registra entrada financeira e crédito disponível na comanda (não é contabilizado como venda até que haja consumo). Em cartão, a taxa é repassada ao cliente e não aumenta o saldo de crédito.
+                    </p>
+
+                    {computedCredits.map((p, idx) => (
+                      <div key={p.id} className="payment-row">
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "0.5rem", alignItems: "end" }}>
+                          <div>
+                            <label className="muted" style={{ fontSize: "0.78rem", display: "block" }}>
+                              Método #{idx + 1}
+                            </label>
+                            <select
+                              className="select"
+                              style={{ width: "100%" }}
+                              value={p.method}
+                              onChange={(e) =>
+                                updateCreditDraftLine(p.id, {
+                                  method: e.target.value as PaymentMethod,
+                                  cashTenderedInput: "",
+                                })
+                              }
+                            >
+                              <option value="pix">Pix</option>
+                              <option value="card">Cartão</option>
+                              <option value="cash">Dinheiro</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="muted" style={{ fontSize: "0.78rem", display: "block" }}>
+                              Crédito a disponibilizar (R$)
+                            </label>
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              className="input"
+                              style={{ width: "100%" }}
+                              placeholder="50,00"
+                              value={p.amountInput}
+                              onChange={(e) =>
+                                updateCreditDraftLine(p.id, { amountInput: e.target.value })
+                              }
+                            />
+                          </div>
+                          {computedCredits.length > 1 && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              style={{ color: "var(--danger)" }}
+                              onClick={() => removeCreditDraftLine(p.id)}
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+
+                        {p.method === "card" && p.amountCents > 0 && (
+                          <div className="muted" style={{ fontSize: "0.83rem", marginTop: "0.45rem" }}>
+                            Crédito disponibilizado: <strong>{formatBRL(p.amountCents)}</strong> · Taxa cartão (
+                            {settings.card_fee_percent.replace(".", ",")}%):{" "}
+                            <strong>{formatBRL(p.feeCents)}</strong> · Cobrar na maquininha:{" "}
+                            <strong style={{ color: "var(--primary-dark)" }}>{formatBRL(p.grossCents)}</strong>
+                          </div>
+                        )}
+
+                        {p.method === "cash" && (
+                          <div style={{ marginTop: "0.55rem", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", alignItems: "center" }}>
+                            <div>
+                              <label className="muted" style={{ fontSize: "0.78rem", display: "block" }}>
+                                Valor entregue em dinheiro (R$)
+                              </label>
+                              <input
+                                type="text"
+                                inputMode="decimal"
+                                className="input"
+                                style={{ width: "100%" }}
+                                placeholder={centsToApiDecimal(p.amountCents).replace(".", ",")}
+                                value={p.cashTenderedInput}
+                                onChange={(e) =>
+                                  updateCreditDraftLine(p.id, { cashTenderedInput: e.target.value })
+                                }
+                              />
+                            </div>
+                            <div style={{ fontSize: "0.9rem" }}>
+                              {p.changeCents !== null && p.changeCents >= 0 ? (
+                                <div>
+                                  Troco:{" "}
+                                  <strong style={{ color: "var(--success)" }}>
+                                    {formatBRL(p.changeCents)}
+                                  </strong>
+                                </div>
+                              ) : (
+                                <div style={{ color: "var(--danger)", fontWeight: 600 }}>
+                                  Valor entregue insuficiente
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+
+                    <div className="field" style={{ marginTop: "0.55rem" }}>
+                      <label className="muted" style={{ fontSize: "0.78rem" }}>
+                        Observação (opcional)
+                      </label>
+                      <input
+                        type="text"
+                        className="input"
+                        placeholder="Ex.: Depósito inicial de ficha pré-paga"
+                        value={creditNote}
+                        onChange={(e) => setCreditNote(e.target.value)}
+                      />
+                    </div>
+
+                    <div className="totals-box" style={{ background: "#fff" }}>
+                      <div className="totals-row">
+                        <span>Crédito líquido adicionado à comanda:</span>
+                        <strong style={{ color: "var(--success)" }}>{formatBRL(creditPrincipalSumCents)}</strong>
+                      </div>
+                      {creditFeeSumCents > 0 && (
+                        <div className="totals-row">
+                          <span>Taxa de cartão repassada (não soma ao crédito):</span>
+                          <strong>{formatBRL(creditFeeSumCents)}</strong>
+                        </div>
+                      )}
+                      <div className="totals-row">
+                        <span>Total bruto a receber agora:</span>
+                        <strong style={{ color: "var(--primary-dark)", fontSize: "1.08rem" }}>
+                          {formatBRL(creditGrossSumCents)}
+                        </strong>
+                      </div>
+                    </div>
+
+                    {creditChangeSumCents > 0 && (
+                      <div className="change-banner">
+                        <span>Troco a devolver ao cliente:</span>
+                        <span>{formatBRL(creditChangeSumCents)}</span>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      className="btn btn-success"
+                      style={{ width: "100%" }}
+                      disabled={submittingCredit || creditPrincipalSumCents <= 0}
+                      onClick={handleConfirmCreditDeposit}
+                    >
+                      {submittingCredit
+                        ? "Registrando depósito…"
+                        : `Confirmar Depósito de Crédito (${formatBRL(creditGrossSumCents)})`}
+                    </button>
+                  </div>
+                )}
+
+                {/* SUB-PAINEL 3: REGISTRAR PAGAMENTO PARCIAL OU INTEGRAL DO SALDO DEVEDOR */}
                 {actionMode === "pay" && (
                   <div style={{ padding: "0.9rem", border: "1px solid var(--border)", borderRadius: 12, background: "#fcfaff" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.65rem" }}>
                       <h3 style={{ fontSize: "1rem", margin: 0 }}>
-                        Registrar recebimento — Comanda #{selectedTab.number}
+                        Quitar saldo a pagar — Comanda #{selectedTab.number}
                       </h3>
                       <button
                         type="button"
@@ -1043,7 +1638,7 @@ export function TabsManager({
 
                     {balanceDueCents <= 0 ? (
                       <p className="muted" style={{ margin: 0 }}>
-                        Esta comanda já está com saldo R$ 0,00. Você pode encerrá-la no botão acima ou lançar novos consumos.
+                        Esta comanda não possui saldo devedor a pagar (R$ 0,00). Caso deseje antecipar crédito para consumos futuros, use a aba <strong>+ Depositar Crédito</strong>.
                       </p>
                     ) : (
                       <>
@@ -1171,7 +1766,7 @@ export function TabsManager({
                             </strong>
                           </div>
                           <div className="totals-row">
-                            <span>Saldo pendente após este pagamento:</span>
+                            <span>Saldo a pagar após este pagamento:</span>
                             <strong
                               style={{
                                 color:
@@ -1211,10 +1806,130 @@ export function TabsManager({
                     )}
                   </div>
                 )}
+
+                {/* SUB-PAINEL 4: DEVOLVER SALDO DE CRÉDITO AO CLIENTE */}
+                {actionMode === "credit_refund" && (
+                  <div style={{ padding: "0.9rem", border: "1px solid var(--border)", borderRadius: 12, background: "#fcfaff" }}>
+                    <h3 style={{ fontSize: "1rem", margin: "0 0 0.5rem" }}>
+                      Devolver saldo de crédito ao cliente — Comanda #{selectedTab.number}
+                    </h3>
+
+                    {creditBalanceCents <= 0 ? (
+                      <p className="muted" style={{ margin: 0 }}>
+                        Esta comanda não possui saldo de crédito disponível para devolução (R$ 0,00).
+                      </p>
+                    ) : (
+                      <form onSubmit={handleConfirmCreditRefund}>
+                        <p className="muted" style={{ fontSize: "0.84rem", marginTop: 0 }}>
+                          Saldo de crédito disponível:{" "}
+                          <strong style={{ color: "var(--primary-dark)" }}>{formatBRL(creditBalanceCents)}</strong>. A devolução pode ser realizada por qualquer meio (mesmo diferente do depósito original) e registrará saída financeira no método selecionado.
+                        </p>
+
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "0.5rem", alignItems: "end", marginBottom: "0.65rem" }}>
+                          <div>
+                            <label className="muted" style={{ fontSize: "0.78rem", display: "block" }}>
+                              Método de saída da devolução
+                            </label>
+                            <select
+                              className="select"
+                              style={{ width: "100%" }}
+                              value={creditRefundMethod}
+                              onChange={(e) => {
+                                setCreditRefundMethod(e.target.value as PaymentMethod);
+                                setCreditRefundIdemKey(generateIdempotencyKey());
+                              }}
+                            >
+                              <option value="cash">Dinheiro</option>
+                              <option value="pix">Pix</option>
+                              <option value="card">Cartão (Estorno na maquininha)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="muted" style={{ fontSize: "0.78rem", display: "block" }}>
+                              Valor a devolver (R$)
+                            </label>
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              className="input"
+                              style={{ width: "100%" }}
+                              placeholder="0,00"
+                              value={creditRefundAmount}
+                              onChange={(e) => {
+                                setCreditRefundAmount(e.target.value);
+                                setCreditRefundIdemKey(generateIdempotencyKey());
+                              }}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ minHeight: 42 }}
+                            onClick={() => {
+                              setCreditRefundAmount(centsToApiDecimal(creditBalanceCents));
+                              setCreditRefundIdemKey(generateIdempotencyKey());
+                            }}
+                          >
+                            Saldo total
+                          </button>
+                        </div>
+
+                        <div className="field">
+                          <label className="muted" style={{ fontSize: "0.78rem" }}>
+                            Observação (opcional)
+                          </label>
+                          <input
+                            type="text"
+                            className="input"
+                            placeholder="Ex.: Devolução de saldo restante no encerramento"
+                            value={creditRefundNote}
+                            onChange={(e) => {
+                              setCreditRefundNote(e.target.value);
+                              setCreditRefundIdemKey(generateIdempotencyKey());
+                            }}
+                          />
+                        </div>
+
+                        <div className="totals-box" style={{ background: "#fff" }}>
+                          <div className="totals-row">
+                            <span>Saída de caixa via {methodLabel(creditRefundMethod)}:</span>
+                            <strong style={{ color: "var(--danger)" }}>{formatBRL(creditRefundInputCents)}</strong>
+                          </div>
+                          <div className="totals-row">
+                            <span>Saldo de crédito após a devolução:</span>
+                            <strong
+                              style={{
+                                color:
+                                  creditBalanceCents - creditRefundInputCents < 0
+                                    ? "var(--danger)"
+                                    : "var(--success)",
+                              }}
+                            >
+                              {creditBalanceCents - creditRefundInputCents >= 0
+                                ? formatBRL(creditBalanceCents - creditRefundInputCents)
+                                : `Excede em ${formatBRL(creditRefundInputCents - creditBalanceCents)}`}
+                            </strong>
+                          </div>
+                        </div>
+
+                        <button
+                          type="submit"
+                          className="btn btn-danger"
+                          style={{ width: "100%" }}
+                          disabled={submittingCreditRefund || creditRefundInputCents <= 0}
+                        >
+                          {submittingCreditRefund
+                            ? "Registrando devolução…"
+                            : `Confirmar Devolução de Crédito (${formatBRL(creditRefundInputCents)})`}
+                        </button>
+                      </form>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
-            {/* HISTÓRICO DE LANÇAMENTOS E PAGAMENTOS DA COMANDA */}
+            {/* HISTÓRICO DE LANÇAMENTOS, DEPÓSITOS DE CRÉDITO, DEVOLUÇÕES E PAGAMENTOS */}
             <hr style={{ border: "none", borderTop: "1px solid var(--border)", margin: "1.25rem 0 1rem" }} />
             <h3 style={{ fontSize: "1rem", marginBottom: "0.5rem" }}>
               Histórico de lançamentos de consumo ({selectedTab.launches.length})
@@ -1311,11 +2026,178 @@ export function TabsManager({
             )}
 
             <h3 style={{ fontSize: "1rem", marginBottom: "0.5rem" }}>
-              Histórico de pagamentos e movimentos ({selectedTab.payments.length})
+              Histórico de depósitos de crédito antecipado ({(selectedTab.credit_deposits ?? []).length})
+            </h3>
+            {(selectedTab.credit_deposits ?? []).length === 0 ? (
+              <p className="muted" style={{ fontSize: "0.9rem" }}>
+                Nenhum depósito de crédito antecipado registrado nesta comanda.
+              </p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem", marginBottom: "1rem" }}>
+                {(selectedTab.credit_deposits ?? []).map((m) => {
+                  const isReversed =
+                    m.kind === "credit_deposit" &&
+                    (reversedCreditMovementIds.has(m.id) || Boolean(m.voided_at));
+                  const isRefundPending =
+                    m.kind === "credit_deposit" && m.customer_refund_status === "pending";
+                  return (
+                    <div
+                      key={m.id}
+                      style={{
+                        padding: "0.6rem 0.8rem",
+                        border: "1px solid var(--border)",
+                        borderRadius: 10,
+                        background: m.direction === "out" || isReversed ? "#fff5f5" : "#fff",
+                        fontSize: "0.88rem",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        flexWrap: "wrap",
+                        gap: "0.5rem",
+                      }}
+                    >
+                      <div>
+                        <span className={`badge ${m.direction === "in" ? "badge-success" : "badge-danger"}`}>
+                          {m.direction === "in"
+                            ? isRefundPending
+                              ? "Depósito Cancelado (Devolução Pendente)"
+                              : isReversed
+                                ? "Depósito de Crédito (Estornado)"
+                                : "Depósito de Crédito"
+                            : "Estorno de Depósito"}
+                        </span>{" "}
+                        <strong style={{ marginLeft: "0.35rem" }}>{methodLabel(m.method)}</strong>
+                        <span className="muted" style={{ marginLeft: "0.4rem", fontSize: "0.8rem" }}>
+                          (#{m.id} às{" "}
+                          {new Date(m.created_at).toLocaleTimeString("pt-BR", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                          )
+                        </span>
+                        {m.cash_tendered && (
+                          <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.2rem" }}>
+                            Entregue: {formatBRL(m.cash_tendered)} · Troco:{" "}
+                            <strong>{formatBRL(m.change_given ?? "0.00")}</strong>
+                          </div>
+                        )}
+                        {m.note && (
+                          <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.15rem" }}>
+                            Obs.: {m.note}
+                          </div>
+                        )}
+                        {m.void_reason && (
+                          <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.15rem" }}>
+                            Motivo do cancelamento: {m.void_reason}
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                        <div style={{ textAlign: "right" }}>
+                          <div>
+                            Crédito: <strong>{formatBRL(m.amount)}</strong>
+                            {m.fee_amount !== "0.00" && ` + Taxa: ${formatBRL(m.fee_amount)}`}
+                          </div>
+                          <div style={{ fontWeight: 700, color: "var(--primary-dark)" }}>
+                            Total bruto: {formatBRL(m.gross_amount)}
+                          </div>
+                        </div>
+                        {isAdmin &&
+                          selectedTab.status === "open" &&
+                          m.kind === "credit_deposit" &&
+                          !isReversed && (
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-sm"
+                              onClick={() => {
+                                setVoidCreditTarget(m);
+                                setVoidCreditReason("");
+                                setVoidCreditRefundCompleted(false);
+                                setVoidCreditMethod(m.method);
+                                setVoidCreditNotes("");
+                                setVoidCreditError(null);
+                              }}
+                            >
+                              Estornar
+                            </button>
+                          )}
+                        {isAdmin && isRefundPending && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => {
+                              setRefundCreditTarget(m);
+                              setRefundCreditMethod(m.method);
+                              setRefundCreditNotes("");
+                              setRefundCreditError(null);
+                            }}
+                          >
+                            Confirmar devolução
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <h3 style={{ fontSize: "1rem", marginBottom: "0.5rem" }}>
+              Histórico de devoluções de crédito ({(selectedTab.credit_refunds ?? []).length})
+            </h3>
+            {(selectedTab.credit_refunds ?? []).length === 0 ? (
+              <p className="muted" style={{ fontSize: "0.9rem" }}>
+                Nenhuma devolução de saldo de crédito registrada nesta comanda.
+              </p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem", marginBottom: "1rem" }}>
+                {(selectedTab.credit_refunds ?? []).map((m) => (
+                  <div
+                    key={m.id}
+                    style={{
+                      padding: "0.6rem 0.8rem",
+                      border: "1px solid var(--border)",
+                      borderRadius: 10,
+                      background: "#fff5f5",
+                      fontSize: "0.88rem",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: "0.5rem",
+                    }}
+                  >
+                    <div>
+                      <span className="badge badge-danger">Devolução de Crédito (Saída)</span>{" "}
+                      <strong style={{ marginLeft: "0.35rem" }}>{methodLabel(m.method)}</strong>
+                      <span className="muted" style={{ marginLeft: "0.4rem", fontSize: "0.8rem" }}>
+                        (#{m.id} às{" "}
+                        {new Date(m.created_at).toLocaleTimeString("pt-BR", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                        )
+                      </span>
+                      {m.note && (
+                        <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.15rem" }}>
+                          Obs.: {m.note}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <strong style={{ color: "var(--danger)" }}>− {formatBRL(m.amount)}</strong>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <h3 style={{ fontSize: "1rem", marginBottom: "0.5rem" }}>
+              Histórico de pagamentos complementares ({selectedTab.payments.length})
             </h3>
             {selectedTab.payments.length === 0 ? (
               <p className="muted" style={{ fontSize: "0.9rem" }}>
-                Nenhum pagamento registrado nesta comanda até o momento.
+                Nenhum pagamento complementar registrado nesta comanda até o momento.
               </p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>
@@ -1387,7 +2269,19 @@ export function TabsManager({
                 <strong>{formatBRL(selectedTab.subtotal_consumed)}</strong>
               </div>
               <div className="totals-row">
-                <span>Principal quitado:</span>
+                <span>Crédito depositado:</span>
+                <strong>{formatBRL(selectedTab.credit_deposited ?? "0.00")}</strong>
+              </div>
+              <div className="totals-row">
+                <span>Crédito aplicado ao consumo:</span>
+                <strong>{formatBRL(selectedTab.credit_applied ?? "0.00")}</strong>
+              </div>
+              <div className="totals-row">
+                <span>Crédito devolvido ao cliente:</span>
+                <strong>{formatBRL(selectedTab.credit_refunded ?? "0.00")}</strong>
+              </div>
+              <div className="totals-row">
+                <span>Principal quitado em pagamentos:</span>
                 <strong>{formatBRL(selectedTab.principal_paid)}</strong>
               </div>
               <div className="totals-row">
@@ -1395,7 +2289,11 @@ export function TabsManager({
                 <strong>{formatBRL(selectedTab.card_fee_paid)}</strong>
               </div>
               <div className="totals-row grand">
-                <span>Saldo pendente:</span>
+                <span>Saldo de crédito disponível:</span>
+                <span style={{ color: "var(--success)" }}>{formatBRL(selectedTab.credit_balance ?? "0.00")}</span>
+              </div>
+              <div className="totals-row grand">
+                <span>Saldo devedor pendente:</span>
                 <span style={{ color: "var(--success)" }}>{formatBRL(selectedTab.balance_due)}</span>
               </div>
             </div>
@@ -1438,7 +2336,7 @@ export function TabsManager({
               Cancelar lançamento #{voidLaunchTarget.id} — Comanda #{selectedTab.number}
             </h2>
             <p className="muted">
-              Valor do lançamento: <strong>{formatBRL(voidLaunchTarget.subtotal)}</strong>. O registro permanecerá no histórico para auditoria.
+              Valor do lançamento: <strong>{formatBRL(voidLaunchTarget.subtotal)}</strong>. Se o consumo estava coberto por crédito antecipado, o saldo de crédito será restaurado automaticamente sem gerar entrada ou saída fictícia de caixa.
             </p>
             {voidError && <div className="alert alert-error">{voidError}</div>}
 
@@ -1464,7 +2362,7 @@ export function TabsManager({
                   onChange={(e) => setVoidRefundCompleted(e.target.checked)}
                 />
                 <label htmlFor="void-launch-refund-done" style={{ margin: 0 }}>
-                  Caso este cancelamento gere excesso de valor já pago pelo cliente, a devolução financeira já foi realizada agora
+                  Caso este cancelamento gere excesso de pagamento complementar já realizado pelo cliente, a devolução financeira já foi realizada agora
                 </label>
               </div>
 
@@ -1562,6 +2460,148 @@ export function TabsManager({
                 </button>
                 <button type="submit" className="btn btn-success" disabled={submittingRefund}>
                   {submittingRefund ? "Registrando…" : "Confirmar Devolução"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== MODAL: ESTORNAR DEPÓSITO DE CRÉDITO (ADMIN) ==================== */}
+      {voidCreditTarget && selectedTab && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="void-credit-title">
+          <div className="modal-card">
+            <h2 id="void-credit-title">
+              Estornar depósito de crédito #{voidCreditTarget.id} — Comanda #{selectedTab.number}
+            </h2>
+            <p className="muted">
+              Valor de crédito do depósito: <strong>{formatBRL(voidCreditTarget.amount)}</strong> (total bruto:{" "}
+              <strong>{formatBRL(voidCreditTarget.gross_amount)}</strong>). O cancelamento contábil reduzirá o crédito disponível da comanda; a saída física de caixa só é registrada quando a devolução financeira ao cliente for confirmada.
+            </p>
+            {voidCreditError && <div className="alert alert-error">{voidCreditError}</div>}
+
+            <form onSubmit={handleVoidCreditDeposit}>
+              <div className="field">
+                <label htmlFor="void-credit-reason">Motivo obrigatório do estorno</label>
+                <input
+                  id="void-credit-reason"
+                  type="text"
+                  className="input"
+                  required
+                  placeholder="Ex.: Depósito lançado em duplicidade"
+                  value={voidCreditReason}
+                  onChange={(e) => setVoidCreditReason(e.target.value)}
+                />
+              </div>
+
+              <div className="field" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                <input
+                  id="void-credit-refund-done"
+                  type="checkbox"
+                  checked={voidCreditRefundCompleted}
+                  onChange={(e) => setVoidCreditRefundCompleted(e.target.checked)}
+                />
+                <label htmlFor="void-credit-refund-done" style={{ margin: 0 }}>
+                  A devolução financeira ao cliente já foi efetivamente realizada agora
+                </label>
+              </div>
+
+              {voidCreditRefundCompleted && (
+                <>
+                  <div className="field">
+                    <label htmlFor="void-credit-method">Meio utilizado na devolução financeira</label>
+                    <select
+                      id="void-credit-method"
+                      className="select"
+                      value={voidCreditMethod}
+                      onChange={(e) => setVoidCreditMethod(e.target.value as PaymentMethod)}
+                    >
+                      <option value="pix">Pix</option>
+                      <option value="card">Estorno na maquininha (Cartão)</option>
+                      <option value="cash">Dinheiro</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="void-credit-notes">Observação (opcional)</label>
+                    <input
+                      id="void-credit-notes"
+                      type="text"
+                      className="input"
+                      value={voidCreditNotes}
+                      onChange={(e) => setVoidCreditNotes(e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
+              <div style={{ display: "flex", gap: "0.6rem", justifyContent: "flex-end", marginTop: "1rem" }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={submittingVoidCredit}
+                  onClick={() => setVoidCreditTarget(null)}
+                >
+                  Cancelar
+                </button>
+                <button type="submit" className="btn btn-danger" disabled={submittingVoidCredit}>
+                  {submittingVoidCredit ? "Estornando…" : "Confirmar Estorno"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== MODAL: CONFIRMAR DEVOLUÇÃO EFETIVA DE DEPÓSITO CANCELADO ==================== */}
+      {refundCreditTarget && selectedTab && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="refund-credit-title">
+          <div className="modal-card">
+            <h2 id="refund-credit-title">
+              Confirmar devolução de depósito cancelado — Comanda #{selectedTab.number}
+            </h2>
+            <p className="muted">
+              Confirme que o valor bruto de{" "}
+              <strong>
+                {formatBRL(refundCreditTarget.customer_refund_amount ?? refundCreditTarget.gross_amount)}
+              </strong>{" "}
+              referente ao depósito #{refundCreditTarget.id} foi efetivamente devolvido ao cliente.
+            </p>
+            {refundCreditError && <div className="alert alert-error">{refundCreditError}</div>}
+
+            <form onSubmit={handleConfirmCreditDepositRefund}>
+              <div className="field">
+                <label htmlFor="refund-credit-method">Meio utilizado na devolução</label>
+                <select
+                  id="refund-credit-method"
+                  className="select"
+                  value={refundCreditMethod}
+                  onChange={(e) => setRefundCreditMethod(e.target.value as PaymentMethod)}
+                >
+                  <option value="pix">Pix</option>
+                  <option value="card">Estorno na maquininha (Cartão)</option>
+                  <option value="cash">Dinheiro</option>
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="refund-credit-notes">Observação (opcional)</label>
+                <input
+                  id="refund-credit-notes"
+                  type="text"
+                  className="input"
+                  value={refundCreditNotes}
+                  onChange={(e) => setRefundCreditNotes(e.target.value)}
+                />
+              </div>
+              <div style={{ display: "flex", gap: "0.6rem", justifyContent: "flex-end", marginTop: "1rem" }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={submittingRefundCredit}
+                  onClick={() => setRefundCreditTarget(null)}
+                >
+                  Cancelar
+                </button>
+                <button type="submit" className="btn btn-success" disabled={submittingRefundCredit}>
+                  {submittingRefundCredit ? "Registrando…" : "Confirmar Devolução"}
                 </button>
               </div>
             </form>

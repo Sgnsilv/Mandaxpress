@@ -53,6 +53,15 @@ export interface CashMovementRecord {
   idempotency_key?: string;
   batch_key?: string | null;
   note?: string | null;
+  voided_by?: number | null;
+  voided_at?: string | null;
+  void_reason?: string | null;
+  customer_refund_status?: "not_applicable" | "pending" | "completed";
+  customer_refund_amount?: string;
+  customer_refunded_at?: string | null;
+  customer_refunded_by?: number | null;
+  customer_refund_method?: PaymentMethod | null;
+  customer_refund_notes?: string | null;
 }
 
 export interface SaleRecord {
@@ -95,14 +104,24 @@ export interface TabRecord {
   voided_subtotal: string;
   principal_paid: string;
   net_principal_paid: string;
+  credit_deposited: string;
+  credit_card_fee_paid: string;
+  credit_applied: string;
+  credit_refunded: string;
+  credit_balance: string;
+  sale_card_fee_paid: string;
   card_fee_paid: string;
   total_charged_paid: string;
+  settled_subtotal: string;
   balance_due: string;
   pending_refund_total: string;
   completed_refund_total: string;
   can_close: boolean;
+  close_blockers?: string[];
   launches: SaleRecord[];
   payments: CashMovementRecord[];
+  credit_deposits: CashMovementRecord[];
+  credit_refunds: CashMovementRecord[];
 }
 
 export interface FinancialSummary {
@@ -113,6 +132,11 @@ export interface FinancialSummary {
   quick_sales_subtotal?: string;
   tabs_consumed_subtotal?: string;
   principal_received_total?: string;
+  tabs_credit_deposited_total?: string;
+  tabs_credit_applied_total?: string;
+  tabs_credit_refunded_total?: string;
+  tabs_credit_balance_total?: string;
+  tabs_credit_card_fees_total?: string;
   card_fees_received_total?: string;
   card_fees_charged_total?: string;
   card_fees_reversed_total?: string;
@@ -121,6 +145,7 @@ export interface FinancialSummary {
   voided_total_charged: string;
   pending_customer_refunds_total: string;
   completed_customer_refunds_total: string;
+  net_received_total?: string;
   tabs_open_count?: number;
   tabs_closed_count?: number;
   tabs_pending_balance_total?: string;
@@ -130,9 +155,16 @@ export interface FinancialSummary {
       recognized_principal: string;
       recognized_fee: string;
       recognized_gross: string;
+      in_principal?: string;
+      in_fee?: string;
+      in_gross?: string;
+      out_principal?: string;
+      out_fee?: string;
+      out_gross?: string;
       net_principal: string;
       net_fee: string;
       net_gross: string;
+      change_given_total?: string;
     }
   >;
 }

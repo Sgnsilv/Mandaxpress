@@ -1091,28 +1091,55 @@ export default function HomePage() {
                   {formatBRL(summary.active_sales_subtotal)} ({summary.active_sales_count})
                 </div>
                 <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.2rem" }}>
-                  Venda rápida: {formatBRL(summary.quick_sales_subtotal ?? "0.00")} · Comandas: {formatBRL(summary.tabs_consumed_subtotal ?? "0.00")}
+                  Venda rápida: {formatBRL(summary.quick_sales_subtotal ?? "0.00")} · Comandas:{" "}
+                  {formatBRL(summary.tabs_consumed_subtotal ?? "0.00")}
                 </div>
               </div>
               <div className="card" style={{ padding: "1rem" }}>
-                <div className="stat-label">Principal recebido e saldo em comandas</div>
-                <div className="stat-value">{formatBRL(summary.principal_received_total ?? summary.active_sales_subtotal)}</div>
+                <div className="stat-label">Liquidação do consumo e saldo devedor</div>
+                <div className="stat-value">
+                  {formatBRL(summary.principal_received_total ?? summary.active_sales_subtotal)}
+                </div>
                 <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.2rem" }}>
-                  Pendente em comandas ({summary.tabs_open_count ?? 0} abertas):{" "}
-                  <strong>{formatBRL(summary.tabs_pending_balance_total ?? "0.00")}</strong> · Taxas cartão:{" "}
-                  {formatBRL(summary.active_card_fees)}
+                  Crédito aplicado: <strong>{formatBRL(summary.tabs_credit_applied_total ?? "0.00")}</strong> · Saldo devedor ({summary.tabs_open_count ?? 0} abertas):{" "}
+                  <strong>{formatBRL(summary.tabs_pending_balance_total ?? "0.00")}</strong>
                 </div>
               </div>
               <div className="card" style={{ padding: "1rem" }}>
-                <div className="stat-label">Recebimento contábil reconhecido</div>
-                <div style={{ fontSize: "0.86rem", marginTop: "0.25rem" }}>
-                  <div>Pix: <strong>{formatBRL(summary.by_method.pix.recognized_gross)}</strong> (caixa: {formatBRL(summary.by_method.pix.net_gross)})</div>
+                <div className="stat-label">Crédito antecipado em comandas</div>
+                <div className="stat-value">
+                  Disponível: {formatBRL(summary.tabs_credit_balance_total ?? "0.00")}
+                </div>
+                <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.2rem" }}>
+                  Depositado: {formatBRL(summary.tabs_credit_deposited_total ?? "0.00")} · Aplicado:{" "}
+                  {formatBRL(summary.tabs_credit_applied_total ?? "0.00")} · Devolvido:{" "}
+                  {formatBRL(summary.tabs_credit_refunded_total ?? "0.00")}
+                </div>
+              </div>
+              <div className="card" style={{ padding: "1rem" }}>
+                <div className="stat-label">Movimento líquido por método</div>
+                <div style={{ fontSize: "0.83rem", marginTop: "0.25rem" }}>
                   <div>
-                    Cartão: <strong>{formatBRL(summary.by_method.card.recognized_gross)}</strong> (Principal{" "}
-                    {formatBRL(summary.by_method.card.recognized_principal)} + Taxa{" "}
-                    {formatBRL(summary.by_method.card.recognized_fee)})
+                    Pix: <strong>{formatBRL(summary.by_method.pix.net_gross)}</strong>{" "}
+                    <span className="muted">
+                      (+{formatBRL(summary.by_method.pix.in_gross ?? summary.by_method.pix.recognized_gross)} / −
+                      {formatBRL(summary.by_method.pix.out_gross ?? "0.00")})
+                    </span>
                   </div>
-                  <div>Dinheiro: <strong>{formatBRL(summary.by_method.cash.recognized_gross)}</strong> (físico: {formatBRL(summary.by_method.cash.net_gross)})</div>
+                  <div>
+                    Cartão: <strong>{formatBRL(summary.by_method.card.net_gross)}</strong>{" "}
+                    <span className="muted">
+                      (+{formatBRL(summary.by_method.card.in_gross ?? summary.by_method.card.recognized_gross)} [taxa{" "}
+                      {formatBRL(summary.by_method.card.in_fee ?? summary.by_method.card.recognized_fee)}])
+                    </span>
+                  </div>
+                  <div>
+                    Dinheiro: <strong>{formatBRL(summary.by_method.cash.net_gross)}</strong>{" "}
+                    <span className="muted">
+                      (+{formatBRL(summary.by_method.cash.in_gross ?? summary.by_method.cash.recognized_gross)} / −
+                      {formatBRL(summary.by_method.cash.out_gross ?? "0.00")})
+                    </span>
+                  </div>
                 </div>
               </div>
               <div className="card" style={{ padding: "1rem" }}>
@@ -1128,7 +1155,8 @@ export default function HomePage() {
                   </div>
                 ) : (
                   <div className="muted" style={{ fontSize: "0.82rem", marginTop: "0.25rem" }}>
-                    Devolvido: {formatBRL(summary.completed_customer_refunds_total)}
+                    Devolvido (estornos): {formatBRL(summary.completed_customer_refunds_total)} · Líquido caixa:{" "}
+                    <strong>{formatBRL(summary.net_received_total ?? summary.active_total_charged)}</strong>
                   </div>
                 )}
               </div>

@@ -51,6 +51,17 @@ def container(config, clock):
     c = build_container(config, clock=clock, hasher=BcryptPasswordHasher(rounds=4))
     conn = c.db.connect(autocommit=True)
     with conn.cursor() as cur:
+        cur.execute("DELETE FROM audit_logs")
+        cur.execute("DELETE FROM cash_movements WHERE reverses_id IS NOT NULL")
+        cur.execute("DELETE FROM cash_movements")
+        cur.execute("DELETE FROM sale_items")
+        cur.execute("DELETE FROM sales")
+        cur.execute("DELETE FROM shifts")
+        cur.execute("DELETE FROM products")
+        cur.execute(
+            "UPDATE payment_settings SET card_fee_percent = 0.00, "
+            "card_fee_mode = 'simple_addition', updated_by = NULL"
+        )
         cur.execute("DELETE FROM sessions")
         cur.execute("DELETE FROM users")
     conn.close()

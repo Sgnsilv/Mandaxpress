@@ -18,6 +18,7 @@ from .repositories import (
     MariaDbSaleRepository,
     MariaDbSessionRepository,
     MariaDbShiftRepository,
+    MariaDbTabRepository,
     MariaDbUserRepository,
 )
 
@@ -72,6 +73,7 @@ class MariaDbUnitOfWork(UnitOfWork):
         self.payment_settings = MariaDbPaymentSettingsRepository(self._conn)
         self.shifts = MariaDbShiftRepository(self._conn)
         self.sales = MariaDbSaleRepository(self._conn)
+        self.tabs = MariaDbTabRepository(self._conn)
         self.cash_movements = MariaDbCashMovementRepository(self._conn)
         self.audit_logs = MariaDbAuditLogRepository(self._conn)
         return self

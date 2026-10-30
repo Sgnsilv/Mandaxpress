@@ -8,6 +8,7 @@ from ...use_cases.auth import AuthService
 from ...use_cases.products import ProductService
 from ...use_cases.sales import QuickSaleService
 from ...use_cases.settings import PaymentSettingsService
+from ...use_cases.tabs import TabService
 from ...use_cases.users import UserAdminService
 from ..db.database import Database, MariaDbUnitOfWork
 from ..security.services import BcryptPasswordHasher, SystemClock
@@ -24,6 +25,7 @@ class Container:
     products: ProductService
     settings: PaymentSettingsService
     sales: QuickSaleService
+    tabs: TabService
 
 
 def build_container(config: Config, clock: Clock = None, hasher: PasswordHasher = None) -> Container:
@@ -45,4 +47,5 @@ def build_container(config: Config, clock: Clock = None, hasher: PasswordHasher 
         products=ProductService(uow_factory, clock),
         settings=PaymentSettingsService(uow_factory, clock),
         sales=QuickSaleService(uow_factory, clock),
+        tabs=TabService(uow_factory, clock),
     )

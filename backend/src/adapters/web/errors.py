@@ -19,6 +19,11 @@ from ...domain.errors import (
     SaleAlreadyVoidedError,
     SaleNotFoundError,
     ShiftClosedError,
+    TabAlreadyOpenError,
+    TabBalancePendingError,
+    TabClosedError,
+    TabIncompleteOperationsError,
+    TabNotFoundError,
     UserAlreadyExistsError,
     UserNotFoundError,
     WeakPasswordError,
@@ -54,9 +59,14 @@ _DOMAIN_STATUS = {
     IdempotencyConflictError: 409,
     SaleAlreadyVoidedError: 409,
     ShiftClosedError: 409,
+    TabAlreadyOpenError: 409,
+    TabClosedError: 409,
+    TabBalancePendingError: 409,
+    TabIncompleteOperationsError: 409,
     UserNotFoundError: 404,
     ProductNotFoundError: 404,
     SaleNotFoundError: 404,
+    TabNotFoundError: 404,
 }
 
 

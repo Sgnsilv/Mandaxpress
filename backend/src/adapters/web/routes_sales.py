@@ -80,6 +80,8 @@ def _serialize_item(it: SaleItem) -> dict:
 def _serialize_movement(m: CashMovement) -> dict:
     return {
         "id": m.id,
+        "tab_id": m.tab_id,
+        "sale_id": m.sale_id,
         "kind": m.kind.value,
         "method": m.method.value,
         "direction": m.direction.value,
@@ -91,7 +93,10 @@ def _serialize_movement(m: CashMovement) -> dict:
         "cash_tendered": f"{m.cash_tendered:.2f}" if m.cash_tendered is not None else None,
         "change_given": f"{m.change_given:.2f}" if m.change_given is not None else None,
         "reverses_id": m.reverses_id,
+        "operator_id": m.operator_id,
         "created_at": m.created_at.isoformat(),
+        "idempotency_key": m.idempotency_key,
+        "batch_key": m.batch_key,
         "note": m.note,
     }
 
@@ -100,6 +105,7 @@ def _serialize_sale(s: Sale) -> dict:
     return {
         "id": s.id,
         "shift_id": s.shift_id,
+        "tab_id": s.tab_id,
         "kind": s.kind.value,
         "status": s.status.value,
         "subtotal": f"{s.subtotal:.2f}",
@@ -112,6 +118,7 @@ def _serialize_sale(s: Sale) -> dict:
         "voided_at": s.voided_at.isoformat() if s.voided_at else None,
         "void_reason": s.void_reason,
         "customer_refund_status": s.customer_refund_status.value,
+        "customer_refund_amount": f"{s.customer_refund_amount:.2f}",
         "customer_refunded_at": s.customer_refunded_at.isoformat() if s.customer_refunded_at else None,
         "customer_refunded_by": s.customer_refunded_by,
         "customer_refund_method": s.customer_refund_method.value if s.customer_refund_method else None,

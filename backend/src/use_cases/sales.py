@@ -209,7 +209,7 @@ class QuickSaleService:
         with self._uow() as uow:
             existing = uow.sales.get_by_idempotency_key(clean_key, for_update=True)
             if existing is not None:
-                if existing.request_fingerprint != fingerprint:
+                if existing.request_fingerprint != fingerprint or existing.kind != SaleKind.QUICK:
                     raise IdempotencyConflictError(
                         "Esta chave de idempotência já foi utilizada com dados diferentes."
                     )
@@ -408,6 +408,28 @@ class QuickSaleService:
             sale = uow.sales.get_by_id(sale_id, for_update=True)
             if sale is None:
                 raise SaleNotFoundError("Venda não encontrada.")
+            if sale.kind == SaleKind.TAB_ITEM and sale.tab_id is not None:
+                tab_id_to_delegate = sale.tab_id
+            else:
+                tab_id_to_delegate = None
+
+        if tab_id_to_delegate is not None:
+            from .tabs import TabService
+            _, updated_sale = TabService(self._uow, self._clock).void_tab_item(
+                actor=actor,
+                tab_id=tab_id_to_delegate,
+                sale_id=sale_id,
+                reason=clean_reason,
+                customer_refund_completed=customer_refund_completed,
+                customer_refund_method=refund_method_enum,
+                customer_refund_notes=clean_notes,
+            )
+            return updated_sale
+
+        with self._uow() as uow:
+            sale = uow.sales.get_by_id(sale_id, for_update=True)
+            if sale is None:
+                raise SaleNotFoundError("Venda não encontrada.")
             if sale.status == SaleStatus.VOIDED:
                 raise SaleAlreadyVoidedError("Esta venda já foi estornada.")
 
@@ -508,6 +530,26 @@ class QuickSaleService:
             raise InvalidInputError("Meio de devolução inválido.") from exc
 
         clean_notes = " ".join(notes.strip().split())[:255] if isinstance(notes, str) and notes.strip() else None
+
+        with self._uow() as uow:
+            sale = uow.sales.get_by_id(sale_id, for_update=True)
+            if sale is None:
+                raise SaleNotFoundError("Venda não encontrada.")
+            if sale.kind == SaleKind.TAB_ITEM and sale.tab_id is not None:
+                tab_id_to_delegate = sale.tab_id
+            else:
+                tab_id_to_delegate = None
+
+        if tab_id_to_delegate is not None:
+            from .tabs import TabService
+            _, updated_sale = TabService(self._uow, self._clock).confirm_tab_customer_refund(
+                actor=actor,
+                tab_id=tab_id_to_delegate,
+                sale_id=sale_id,
+                method=method_enum,
+                notes=clean_notes,
+            )
+            return updated_sale
 
         with self._uow() as uow:
             sale = uow.sales.get_by_id(sale_id, for_update=True)

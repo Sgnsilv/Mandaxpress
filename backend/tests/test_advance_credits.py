@@ -31,6 +31,11 @@ from src.domain.models import (
 from src.use_cases.sales import QuickSaleItemInput, QuickSalePaymentInput
 
 
+@pytest.fixture(autouse=True)
+def _open_default_shift(container, operator):
+    container.shifts.open_shift(actor=operator, opening_cash="0.00")
+
+
 def test_01_open_tab_and_pix_credit_deposit(client, operator):
     """1. Abertura de comanda e depósito por Pix (passivo de crédito, não venda)."""
     op_headers = logged_in(client, "caixa")

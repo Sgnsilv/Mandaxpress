@@ -154,6 +154,7 @@ def test_product_duplicate_name_and_not_found(container, admin, operator):
 
 
 def test_price_change_and_deactivation_preserve_past_sales_and_forbid_physical_delete(container, admin, operator):
+    container.shifts.open_shift(actor=operator, opening_cash="0.00")
     prod = container.products.create_product(admin, "Açaí Especial", "20.00", category="Açaí")
 
     sale, created = container.sales.confirm_quick_sale(

@@ -16,6 +16,11 @@ from src.domain.models import CardFeeMode, PaymentMethod, SaleItemKind
 from src.use_cases.sales import QuickSaleItemInput, QuickSalePaymentInput
 
 
+@pytest.fixture(autouse=True)
+def _open_default_shift(container, operator):
+    container.shifts.open_shift(actor=operator, opening_cash="0.00")
+
+
 def test_quick_sale_single_product_pix(container, admin, operator):
     p = container.products.create_product(admin, "Açaí 300ml", "15.00")
 

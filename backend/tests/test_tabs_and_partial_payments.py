@@ -33,6 +33,11 @@ from src.domain.models import (
 from src.use_cases.sales import QuickSaleItemInput, QuickSalePaymentInput
 
 
+@pytest.fixture(autouse=True)
+def _open_default_shift(container, operator):
+    container.shifts.open_shift(actor=operator, opening_cash="0.00")
+
+
 def test_open_tab_with_and_without_customer_name(client, operator):
     op_headers = logged_in(client, "caixa")
 

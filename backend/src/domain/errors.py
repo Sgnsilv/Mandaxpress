@@ -68,3 +68,24 @@ class ShiftClosedError(DomainError):
 
 class InvalidPaymentError(DomainError):
     code = "invalid_payment"
+
+
+class TabNotFoundError(DomainError):
+    code = "tab_not_found"
+
+
+class TabAlreadyOpenError(DomainError):
+    code = "tab_already_open"
+
+
+class TabClosedError(DomainError):
+    code = "tab_closed"
+
+
+class TabBalancePendingError(DomainError):
+    code = "tab_balance_pending"
+
+
+class TabIncompleteOperationsError(DomainError):
+    code = "tab_incomplete_operations"
+

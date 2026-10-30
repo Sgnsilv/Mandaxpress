@@ -1,9 +1,16 @@
 """Regras e cálculos financeiros puros do domínio (Decimal exato, sem float)."""
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Optional, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 from .errors import InvalidInputError, InvalidPaymentError
-from .models import CardFeeMode, PaymentLinePreview, PaymentMethod
+from .models import (
+    CardFeeMode,
+    CashDirection,
+    CashMovement,
+    CashMovementKind,
+    PaymentLinePreview,
+    PaymentMethod,
+)
 
 TWO_PLACES = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -155,3 +162,67 @@ def build_payment_line_preview(
         )
 
     raise InvalidInputError(f"Forma de pagamento inválida: {method}")
+
+
+def plan_tab_excess_reversals(
+    payments: Sequence[CashMovement],
+    excess_principal: Decimal,
+) -> List[Tuple[CashMovement, Decimal, Decimal, Decimal]]:
+    """Aloca o excesso de principal pago em uma comanda quando o consumo ativo
+    passa a ser menor que o principal líquido recebido.
+
+    Regras financeiras para pagamentos mistos e taxas de cartão:
+    1. Prioriza a reversão sobre pagamentos sem taxa de operadora (`cash` e `pix`, em ordem LIFO)
+       antes de alcançar parcelas pagas em `card` (também em ordem LIFO). Assim, em pagamentos
+       divididos ou parciais mistos, o resultado independe da ordem em que o operador lançou
+       as linhas do pagamento dividido e preserva a transação de cartão sempre que possível.
+    2. Não presume devolução automática nem proporcional da taxa de cartão pela maquininha:
+       o cancelamento de consumo na comanda gera obrigação de devolução restrita ao principal
+       excedente (`fee_to_reverse = 0.00`, `gross_to_reverse = principal_to_reverse`), mantendo
+       a taxa originalmente cobrada na transação de cartão registrada separadamente no livro-razão.
+
+    Retorna lista de `(original_movement, principal_to_reverse, fee_to_reverse, gross_to_reverse)`.
+    """
+    if excess_principal <= ZERO:
+        return []
+
+    originals = [
+        m for m in payments
+        if m.kind == CashMovementKind.SALE_PAYMENT and m.direction == CashDirection.IN
+    ]
+    reversals = [
+        m for m in payments
+        if m.kind == CashMovementKind.REVERSAL and m.direction == CashDirection.OUT
+    ]
+
+    reversed_principal_by_id = {}
+    for r in reversals:
+        if r.reverses_id is not None:
+            reversed_principal_by_id[r.reverses_id] = (
+                reversed_principal_by_id.get(r.reverses_id, ZERO) + r.amount
+            )
+
+    # 1º: Pagamentos sem taxa (dinheiro/Pix) em LIFO; 2º: Pagamentos em cartão em LIFO.
+    non_card_lifo = [m for m in reversed(originals) if m.method != PaymentMethod.CARD]
+    card_lifo = [m for m in reversed(originals) if m.method == PaymentMethod.CARD]
+    ordered_candidates = non_card_lifo + card_lifo
+
+    remaining = excess_principal
+    plan: List[Tuple[CashMovement, Decimal, Decimal, Decimal]] = []
+
+    for mov in ordered_candidates:
+        if remaining <= ZERO:
+            break
+        avail_principal = mov.amount - reversed_principal_by_id.get(mov.id, ZERO)
+        if avail_principal <= ZERO:
+            continue
+
+        take_principal = min(remaining, avail_principal)
+        # Não presume devolução automática ou proporcional de taxa pela maquininha:
+        take_fee = ZERO
+        take_gross = take_principal
+        plan.append((mov, take_principal, take_fee, take_gross))
+        remaining -= take_principal
+
+    return plan
+

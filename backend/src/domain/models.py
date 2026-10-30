@@ -27,6 +27,11 @@ class ShiftStatus(str, Enum):
     CLOSED = "closed"
 
 
+class TabStatus(str, Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+
+
 class SaleKind(str, Enum):
     QUICK = "quick"
     TAB_ITEM = "tab_item"
@@ -154,6 +159,8 @@ class CashMovement:
     created_at: datetime
     idempotency_key: str
     note: Optional[str] = None
+    batch_key: Optional[str] = None
+    request_fingerprint: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -174,12 +181,46 @@ class Sale:
     voided_at: Optional[datetime] = None
     void_reason: Optional[str] = None
     customer_refund_status: CustomerRefundStatus = CustomerRefundStatus.NOT_APPLICABLE
+    customer_refund_amount: Decimal = Decimal("0.00")
     customer_refunded_at: Optional[datetime] = None
     customer_refunded_by: Optional[int] = None
     customer_refund_method: Optional[PaymentMethod] = None
     customer_refund_notes: Optional[str] = None
     items: List[SaleItem] = field(default_factory=list)
     payments: List[CashMovement] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Tab:
+    id: int
+    shift_id: int
+    number: int
+    customer_name: Optional[str]
+    status: TabStatus
+    opened_by: int
+    opened_at: datetime
+    closed_by: Optional[int] = None
+    closed_at: Optional[datetime] = None
+    notes: Optional[str] = None
+    subtotal_consumed: Decimal = Decimal("0.00")
+    voided_subtotal: Decimal = Decimal("0.00")
+    principal_paid: Decimal = Decimal("0.00")
+    net_principal_paid: Decimal = Decimal("0.00")
+    card_fee_paid: Decimal = Decimal("0.00")
+    total_charged_paid: Decimal = Decimal("0.00")
+    balance_due: Decimal = Decimal("0.00")
+    pending_refund_total: Decimal = Decimal("0.00")
+    completed_refund_total: Decimal = Decimal("0.00")
+    launches: List[Sale] = field(default_factory=list)
+    payments: List[CashMovement] = field(default_factory=list)
+
+    @property
+    def can_close(self) -> bool:
+        return (
+            self.status == TabStatus.OPEN
+            and self.balance_due == Decimal("0.00")
+            and self.pending_refund_total == Decimal("0.00")
+        )
 
 
 @dataclass(frozen=True)

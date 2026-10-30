@@ -10,6 +10,7 @@ from .models import (
     CashDirection,
     CashMovement,
     CashMovementKind,
+    CustomerRefundStatus,
     PaymentMethod,
     PaymentSettings,
     Product,
@@ -20,6 +21,8 @@ from .models import (
     SaleKind,
     SessionRecord,
     Shift,
+    Tab,
+    TabStatus,
     User,
 )
 
@@ -115,6 +118,9 @@ class SaleRepository(ABC):
     def list_recent(self, limit: int = 50, shift_id: Optional[int] = None) -> List[Sale]: ...
 
     @abstractmethod
+    def list_by_tab(self, tab_id: int, for_update: bool = False) -> List[Sale]: ...
+
+    @abstractmethod
     def create_sale(
         self,
         shift_id: int,
@@ -145,11 +151,50 @@ class SaleRepository(ABC):
     def mark_voided(self, sale_id: int, voided_by: int, voided_at: datetime,
                     reason: str, customer_refund_completed: bool = False,
                     customer_refund_method: Optional[PaymentMethod] = None,
-                    customer_refund_notes: Optional[str] = None) -> None: ...
+                    customer_refund_notes: Optional[str] = None,
+                    customer_refund_status: Optional[CustomerRefundStatus] = None,
+                    customer_refund_amount: Optional[Decimal] = None) -> None: ...
 
     @abstractmethod
     def mark_customer_refunded(self, sale_id: int, refunded_by: int, refunded_at: datetime,
                                method: PaymentMethod, notes: Optional[str] = None) -> None: ...
+
+
+class TabRepository(ABC):
+    @abstractmethod
+    def create_tab(
+        self,
+        shift_id: int,
+        number: int,
+        customer_name: Optional[str],
+        opened_by: int,
+        opened_at: datetime,
+        notes: Optional[str] = None,
+    ) -> int: ...
+
+    @abstractmethod
+    def get_by_id(self, tab_id: int, for_update: bool = False) -> Optional[Tab]: ...
+
+    @abstractmethod
+    def get_open_by_number(self, number: int, for_update: bool = False) -> Optional[Tab]: ...
+
+    @abstractmethod
+    def list_tabs(
+        self,
+        status: Optional[TabStatus] = None,
+        number: Optional[int] = None,
+        search: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Tab]: ...
+
+    @abstractmethod
+    def close_tab(
+        self,
+        tab_id: int,
+        closed_by: int,
+        closed_at: datetime,
+        notes: Optional[str] = None,
+    ) -> None: ...
 
 
 class CashMovementRepository(ABC):
@@ -174,10 +219,21 @@ class CashMovementRepository(ABC):
         idempotency_key: str,
         note: Optional[str] = None,
         tab_id: Optional[int] = None,
+        batch_key: Optional[str] = None,
+        request_fingerprint: Optional[str] = None,
     ) -> CashMovement: ...
 
     @abstractmethod
+    def get_by_idempotency_key(self, idempotency_key: str, for_update: bool = False) -> Optional[CashMovement]: ...
+
+    @abstractmethod
+    def list_by_batch_key(self, batch_key: str, for_update: bool = False) -> List[CashMovement]: ...
+
+    @abstractmethod
     def list_by_sale(self, sale_id: int, for_update: bool = False) -> List[CashMovement]: ...
+
+    @abstractmethod
+    def list_by_tab(self, tab_id: int, for_update: bool = False) -> List[CashMovement]: ...
 
     @abstractmethod
     def get_financial_summary(self, shift_id: Optional[int] = None) -> dict: ...
@@ -201,6 +257,7 @@ class UnitOfWork(ABC):
     payment_settings: PaymentSettingsRepository
     shifts: ShiftRepository
     sales: SaleRepository
+    tabs: TabRepository
     cash_movements: CashMovementRepository
     audit_logs: AuditLogRepository
 

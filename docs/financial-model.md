@@ -1,6 +1,6 @@
-# Mandaxpress — Modelo financeiro (Blocos 2 e 3 implementados; preparado para Blocos 4 e 5)
+# Mandaxpress — Modelo financeiro (Blocos 1 a 5 concluídos)
 
-Status: **núcleo dos Blocos 2 e 3 implementado e validado em MariaDB** (`003_create_products_and_quick_sales.sql` e `004_create_tabs_and_partial_payments.sql`). Créditos antecipados (Bloco 4) e fechamento completo de turno (Bloco 5) estão previstos no mesmo livro-razão (`cash_movements`).
+Status: **Ciclo operacional completo implementado e validado em MariaDB** (migrations `001` a `006`). O Mandaxpress contempla autenticação, controle de acesso, produtos, venda rápida, comandas abertas com consumo incremental, pagamentos parciais/divididos, depósitos de crédito antecipado com aplicação automática e devoluções, sangria e suprimento, conferência por método e fechamento de caixa atômico com snapshot histórico imutável.
 
 ## 1. Princípio: quatro conceitos separados
 
@@ -276,7 +276,65 @@ Essas definições garantem duas identidades globais exatas no resumo financeiro
   - Quando o consumo cancelado estava coberto por crédito antecipado, a redução de `subtotal_consumed` reduz `credit_applied` e **restaura automaticamente o crédito em `credit_balance`**, sem gerar movimentos fictícios de entrada ou saída em `cash_movements` (`customer_refund_status = 'not_applicable'`).
   - Quando o consumo cancelado estava parcialmente coberto por crédito e parcialmente pago por pagamento complementar (`sale_payment`), o crédito é restaurado ao `credit_balance` e apenas eventual excesso de `sale_payment` sobre o consumo remanescente gera devolução financeira ao cliente (`pending` ou `completed`).
 
-## 9. Impacto no Fechamento de Caixa (Bloco 5)
-- Como vendas rápidas, comandas, depósitos antecipados e devoluções compartilham as tabelas `sales` e `cash_movements` vinculadas a `shift_id`, o fechamento de caixa no Bloco 5 consultará um único livro-razão:
-  - **Entradas, saídas e líquido por método (`in_gross`, `out_gross`, `net_gross`)**: refletem exatamente o dinheiro físico na gaveta (`opening_cash + by_method.cash.net_gross`, já descontadas devoluções em espécie de crédito ou estornos) e os valores liquidados em Pix e Cartão.
-  - **Verificação de pendências de turno**: o fechamento poderá inspecionar `tabs_open_count`, `tabs_pending_balance_total`, `tabs_credit_balance_total` e `pending_customer_refunds_count`.
+## 10. Abertura, Movimentações de Gaveta e Fechamento de Caixa (Bloco 5)
+
+### 10.1. Abertura Explícita de Turno (`POST /api/shifts/open`)
+- Substitui a abertura implícita antiga: nenhuma venda, comanda, depósito de crédito, sangria ou suprimento pode ser realizado sem turno aberto (`409 Conflict` / `shift_closed`).
+- O operador informa o fundo inicial disponível para troco (`opening_cash >= 0.00`).
+- **Não contabilização como receita:** o fundo inicial é registrado em `shifts.opening_cash` e jamais entra como venda de produtos (`total_products_sold`) ou receita operacional.
+- **Unicidade de turno aberto:** garantida na aplicação (`SELECT ... FOR UPDATE`) e no MariaDB via coluna gerada persistente `open_singleton` + constraint única `uq_shifts_open_singleton`, impedindo dois turnos abertos simultaneamente.
+- Idempotência suportada via `open_idempotency_key` e `open_request_fingerprint`.
+
+### 10.2. Movimentações de Gaveta: Sangria e Suprimento
+Registradas no livro-razão `cash_movements` com `method = 'cash'`, isoladas de vendas e de clientes:
+- **Sangria (`kind = 'cash_withdrawal'`, `direction = 'out'`):** retirada física de dinheiro da gaveta (ex.: recolhimento para cofre). Reduz o saldo esperado em dinheiro na gaveta sem alterar o total de produtos vendidos ou devoluções a clientes.
+- **Suprimento (`kind = 'cash_supply'`, `direction = 'in'`):** adição de dinheiro na gaveta para troco. Aumenta o saldo esperado em dinheiro sem inflar vendas ou depósitos de clientes.
+- Ambas exigem valor positivo (`> 0.00`), motivo obrigatório (`>= 3` caracteres), operador autenticado e turno aberto.
+
+### 10.3. Fórmula do Saldo Esperado em Dinheiro (Gaveta)
+$$\text{dinheiro\_esperado} = \text{fundo\_inicial} + \text{entradas\_efetivas\_dinheiro} - \text{saídas\_efetivas\_dinheiro} + \text{suprimentos} - \text{sangrias}$$
+
+Onde:
+- $\text{entradas\_efetivas\_dinheiro}$: pagamentos em dinheiro de vendas rápidas e comandas (já líquidos de troco entregue, sem duplicidade) + depósitos de crédito em dinheiro;
+- $\text{saídas\_efetivas\_dinheiro}$: devoluções em espécie de saldo de crédito (`credit_refund`) + devoluções efetivas de estornos (`reversal`);
+- $\text{suprimentos}$: soma dos movimentos `kind = 'cash_supply'`;
+- $\text{sangrias}$: soma dos movimentos `kind = 'cash_withdrawal'`.
+
+**Exemplo da especificação (§5):**
+- Fundo inicial: R$ 150,00
+- Vendas recebidas em dinheiro: R$ 80,00
+- Depósitos de crédito em dinheiro: R$ 50,00
+- Devoluções em dinheiro: R$ 18,00
+- Sangria: R$ 100,00
+$$\text{dinheiro\_esperado} = 150 + (80 + 50) - 18 + 0 - 100 = \text{R\$\ 162,00}$$
+
+### 10.4. Conferência por Método de Pagamento e Divergências
+O sistema calcula e exibe separadamente:
+- **Dinheiro:** Fundo inicial, entradas, saídas, suprimentos, sangrias, saldo esperado, valor contado pelo operador e diferença ($\text{conferido} - \text{esperado}$).
+- **Pix:** Entradas, devoluções efetivas, total líquido registrado, valor conferido no extrato bancário e diferença.
+- **Cartão:** Principal recebido, taxas repassadas cobradas, total bruto de transações registrado na maquininha, estornos efetivos e valor conferido no relatório da maquininha. (O sistema não presume desconto da adquirente nem liquidação bancária imediata).
+
+**Classificação de divergências:**
+- $\text{diferenca} > 0$: sobra;
+- $\text{diferenca} < 0$: falta;
+- $\text{diferenca} == 0$: conferência exata.
+- **Regra:** se houver sobra ou falta em qualquer método, o encerramento do turno **exige justificativa obrigatória** do operador (mínimo de 3 caracteres). Nenhum movimento financeiro fictício é gerado.
+
+### 10.5. Bloqueios Obrigatórios de Fechamento por Pendências
+O sistema bloqueia atomicamente o fechamento (`409 Conflict` / `shift_close_blocked`) se houver:
+1. Comandas abertas (`open_tabs_count > 0`);
+2. Saldo de consumo não pago (`unpaid_consumption_total > 0.00`);
+3. Saldo de crédito antecipado não devolvido ao cliente (`unrefunded_credit_total > 0.00`);
+4. Devoluções pendentes ao cliente decorrentes de cancelamentos (`pending_refunds_count > 0`);
+5. Operações financeiras de comandas em estado inconsistente.
+
+O sistema apresenta quais itens impedem o fechamento e proíbe cancelamentos ou liquidações fictícias automáticas.
+
+### 10.6. Encerramento Atômico e Snapshot Imutável (`POST /api/shifts/close`)
+- Executado em transação serializada (`SELECT ... FOR UPDATE`);
+- Valida ausência de bloqueios e presença de justificativa se houver diferença;
+- Persiste os valores conferidos, diferenças e um snapshot JSON completo em `shifts.closing_snapshot`;
+- Altera o turno para `status = 'closed'`;
+- Impede fechar duas vezes o mesmo turno e proíbe reabrir turnos encerrados no MVP;
+- Bloqueia novas vendas, sangrias, suprimentos ou estornos de vendas pertencentes a turnos fechados.
+

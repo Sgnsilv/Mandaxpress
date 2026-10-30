@@ -161,6 +161,15 @@ class CashMovement:
     note: Optional[str] = None
     batch_key: Optional[str] = None
     request_fingerprint: Optional[str] = None
+    voided_by: Optional[int] = None
+    voided_at: Optional[datetime] = None
+    void_reason: Optional[str] = None
+    customer_refund_status: CustomerRefundStatus = CustomerRefundStatus.NOT_APPLICABLE
+    customer_refund_amount: Decimal = Decimal("0.00")
+    customer_refunded_at: Optional[datetime] = None
+    customer_refunded_by: Optional[int] = None
+    customer_refund_method: Optional[PaymentMethod] = None
+    customer_refund_notes: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -204,23 +213,50 @@ class Tab:
     notes: Optional[str] = None
     subtotal_consumed: Decimal = Decimal("0.00")
     voided_subtotal: Decimal = Decimal("0.00")
+    credit_deposited: Decimal = Decimal("0.00")
+    credit_card_fee_paid: Decimal = Decimal("0.00")
+    credit_applied: Decimal = Decimal("0.00")
+    credit_refunded: Decimal = Decimal("0.00")
+    credit_balance: Decimal = Decimal("0.00")
     principal_paid: Decimal = Decimal("0.00")
     net_principal_paid: Decimal = Decimal("0.00")
+    sale_card_fee_paid: Decimal = Decimal("0.00")
     card_fee_paid: Decimal = Decimal("0.00")
     total_charged_paid: Decimal = Decimal("0.00")
+    settled_subtotal: Decimal = Decimal("0.00")
     balance_due: Decimal = Decimal("0.00")
     pending_refund_total: Decimal = Decimal("0.00")
     completed_refund_total: Decimal = Decimal("0.00")
     launches: List[Sale] = field(default_factory=list)
     payments: List[CashMovement] = field(default_factory=list)
+    credit_deposits: List[CashMovement] = field(default_factory=list)
+    credit_refunds: List[CashMovement] = field(default_factory=list)
 
     @property
     def can_close(self) -> bool:
         return (
             self.status == TabStatus.OPEN
             and self.balance_due == Decimal("0.00")
+            and self.credit_balance == Decimal("0.00")
             and self.pending_refund_total == Decimal("0.00")
+            and self.net_principal_paid <= self.subtotal_consumed
         )
+
+    @property
+    def close_blockers(self) -> List[str]:
+        blockers: List[str] = []
+        if self.status != TabStatus.OPEN:
+            blockers.append("already_closed")
+            return blockers
+        if self.pending_refund_total > Decimal("0.00"):
+            blockers.append("customer_refund_pending")
+        if self.balance_due > Decimal("0.00"):
+            blockers.append("balance_due_pending")
+        if self.credit_balance > Decimal("0.00"):
+            blockers.append("credit_balance_pending")
+        if self.net_principal_paid > self.subtotal_consumed and self.pending_refund_total == Decimal("0.00"):
+            blockers.append("reconciliation_pending")
+        return blockers
 
 
 @dataclass(frozen=True)

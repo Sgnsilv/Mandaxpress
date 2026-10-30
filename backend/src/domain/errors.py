@@ -86,6 +86,14 @@ class TabBalancePendingError(DomainError):
     code = "tab_balance_pending"
 
 
+class TabCreditBalancePendingError(DomainError):
+    code = "tab_credit_balance_pending"
+
+
+class InsufficientCreditError(DomainError):
+    code = "insufficient_credit"
+
+
 class TabIncompleteOperationsError(DomainError):
     code = "tab_incomplete_operations"
 

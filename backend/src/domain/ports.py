@@ -236,6 +236,29 @@ class CashMovementRepository(ABC):
     def list_by_tab(self, tab_id: int, for_update: bool = False) -> List[CashMovement]: ...
 
     @abstractmethod
+    def mark_credit_deposit_voided(
+        self,
+        movement_id: int,
+        voided_by: int,
+        voided_at: datetime,
+        reason: str,
+        customer_refund_status: CustomerRefundStatus,
+        customer_refund_amount: Decimal,
+        customer_refund_method: Optional[PaymentMethod] = None,
+        customer_refund_notes: Optional[str] = None,
+    ) -> None: ...
+
+    @abstractmethod
+    def mark_credit_deposit_refunded(
+        self,
+        movement_id: int,
+        refunded_by: int,
+        refunded_at: datetime,
+        method: PaymentMethod,
+        notes: Optional[str] = None,
+    ) -> None: ...
+
+    @abstractmethod
     def get_financial_summary(self, shift_id: Optional[int] = None) -> dict: ...
 
 
